@@ -86,6 +86,9 @@ class ControlMPCChamber:
                 temp = self.heater.get_temp(
                     self.heater.reactor.monotonic())[0]
                 self.model.set_initial_state(temp)
+            # Set ambient from saved calibration value
+            ambient = profile.get('ambient_temp', 25.0)
+            self.model.set_ambient(ambient)
             self._valid = True
         else:
             self.model = None

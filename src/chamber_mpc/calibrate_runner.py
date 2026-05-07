@@ -490,6 +490,9 @@ class MpcChamberCalibrateRunner:
         configfile.set(
             cfgname, 'smoothing',
             "%.2f" % result.smoothing)
+        configfile.set(
+            cfgname, 'ambient_temp',
+            "%.1f" % result.t_ambient)
 
         # h calibration points
         h_interp = HInterpolator(result.h_points)

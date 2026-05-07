@@ -188,34 +188,46 @@ class ThermalModel:
         self.state_sensor_temp += adjustment
 
     def _update_ambient(self, dt, read_time):
-        """Update ambient temperature estimate."""
-        # Use external sensor if available
+        """Update ambient temperature estimate.
+
+        Conservative approach: only adjust when the system is genuinely
+        near steady state (small model-sensor gap AND small temperature
+        rate of change). This prevents runaway ambient drift during
+        transients like startup, large setpoint changes, or overshoot.
+        """
+        # Use external sensor if available (overrides adaptive estimation)
         if self.want_ambient_refresh and self._ambient_temp_fn is not None:  # pragma: no cover
             try:
                 temp, _ = self._ambient_temp_fn(read_time)
                 if temp != 0.0:
                     self.state_ambient_temp = temp
                     self.want_ambient_refresh = False
+                    return
             except Exception:
                 pass  # sensor read failure
 
-        # Adaptive ambient estimation (Kalico pattern)  # pragma: no cover
-        # Only adjust when heater is partially on (not saturated) or
-        # when the system appears to be near steady state
-        if (self.last_power > 0 and
-                self.last_power < self.heater_power) or \
-                abs(self.state_chamber_temp - self.state_sensor_temp) < \
-                self.steady_state_rate * dt:
-            # Direction of ambient adjustment matches the correction
-            measured_adjustment = (
-                self.state_sensor_temp - self.state_chamber_temp)
-            if measured_adjustment > 0:
-                ambient_delta = max(
-                    measured_adjustment, self.min_ambient_change * dt)
-            else:
-                ambient_delta = min(
-                    measured_adjustment, -self.min_ambient_change * dt)
-            self.state_ambient_temp += ambient_delta
+        # Adaptive ambient estimation - very conservative for chambers
+        # Only adjust when ALL conditions are met:
+        # 1. Heater is partially on (not off or fully saturated)
+        # 2. Model and sensor are close (system is settled)
+        # 3. Temperature is not changing rapidly
+        model_sensor_gap = abs(
+            self.state_chamber_temp - self.state_sensor_temp)
+        if model_sensor_gap > 2.0:
+            return  # model hasn't converged yet, don't adjust ambient
+
+        if not (0 < self.last_power < self.heater_power * 0.95):
+            return  # heater is off or saturated, measurement unreliable
+
+        # Very small adjustment rate for chambers (0.01 deg C/s max)
+        max_rate = 0.01
+        error = self.state_sensor_temp - self.state_chamber_temp
+        delta = max(-max_rate * dt, min(max_rate * dt, error * 0.1 * dt))
+        self.state_ambient_temp += delta
+
+        # Clamp ambient to reasonable range
+        self.state_ambient_temp = max(
+            -10.0, min(50.0, self.state_ambient_temp))
 
     def _compute_output(self, target_temp, read_time, max_power):
         """Compute desired heater output."""

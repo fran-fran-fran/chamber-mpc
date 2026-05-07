@@ -40,6 +40,7 @@ class ChamberMpcModule:
 
         # Parse all MPC parameters into a profile dict
         self.profile = self._parse_profile(config)
+        self.profile['name'] = 'chamber_mpc'
 
         # Register GCode commands during config loading phase
         gcode = self.printer.lookup_object('gcode')
@@ -84,6 +85,8 @@ class ChamberMpcModule:
             'min_ambient_change', 1.0)
         profile['steady_state_rate'] = config.getfloat(
             'steady_state_rate', 0.5)
+        profile['ambient_temp'] = config.getfloat(
+            'ambient_temp', 25.0)
         profile['max_temp_margin'] = config.getfloat(
             'max_temp_margin', 5.0)
 

@@ -77,6 +77,7 @@ bed_transfer: 0.35
 | `heating_element_margin` | optional | 20.0 | Zone below the hard limit where output starts tapering down proportionally (deg C) |
 | `bed_heater` | optional | none | Name of bed heater for disturbance feedforward |
 | `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient in W/K |
+| `ambient_temp` | optional | 25.0 (calibrated) | External ambient temperature (deg C) |
 | `ambient_temp_sensor` | optional | none | External ambient temperature sensor |
 
 ## Calibration
