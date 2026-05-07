@@ -180,7 +180,7 @@ class ControlMPCChamber:
         else:
             self._cap_warned = False
 
-        max_power = self.heater.get_max_power()
+        max_power = self.heater.max_power
         duty = self.model.update(read_time, temp, target_temp, max_power)
         self.heater.set_pwm(read_time, duty)
 
