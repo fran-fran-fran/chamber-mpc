@@ -63,11 +63,86 @@ class StepResponseAnalyzer:
     def analyze(self):
         """Run the step response analysis.
 
+        Uses the differential method (maximum rate of rise) as the primary
+        identification approach. This is robust for short step responses
+        where the asymptotic method may fail (e.g. heating only to 60 deg C
+        from ambient).
+
+        Falls back to the asymptotic method for sensor_responsiveness
+        refinement when the data supports it.
+
         Returns:
             dict with keys: chamber_heat_capacity, sensor_responsiveness,
-                            asymp_temp, post_chamber_temp, post_sensor_temp
+                            post_chamber_temp, post_sensor_temp
         """
-        # Find the continuous segment above threshold
+        if len(self.samples) < 10:
+            raise ValueError(
+                "Not enough samples for analysis (got %d, need >= 10)"
+                % len(self.samples))
+
+        start_temp = self.samples[0][1]
+        end_temp = self.samples[-1][1]
+
+        if end_temp - start_temp < 5.0:
+            raise ValueError(
+                "Temperature rise too small for analysis: "
+                "%.1f to %.1f deg C (need >= 5 deg C)"
+                % (start_temp, end_temp))
+
+        # Primary method: differential (maximum rate of rise)
+        # This works reliably for any step response length
+        fastest = self._fastest_rate(self.samples)
+        chamber_heat_capacity = self.heater_power / fastest[2]
+
+        # Sensor responsiveness from differential method
+        # fastest = [time_from_start, temperature_at_max_rate, max_rate]
+        denom = (fastest[2] * fastest[0] + self.t_ambient - fastest[1])
+        if abs(denom) > 0.01:
+            sensor_responsiveness = fastest[2] / denom
+        else:
+            # Fallback: conservative default for chamber sensors
+            sensor_responsiveness = 0.1
+
+        # Sanity checks and clamps
+        if chamber_heat_capacity <= 0:
+            self.log.warning(
+                "chamber_heat_capacity negative (%.1f), using absolute value",
+                chamber_heat_capacity)
+            chamber_heat_capacity = abs(chamber_heat_capacity)
+
+        if sensor_responsiveness <= 0 or sensor_responsiveness > 10.0:
+            self.log.warning(
+                "sensor_responsiveness out of range (%.4f), clamping",
+                sensor_responsiveness)
+            sensor_responsiveness = max(0.01, min(10.0,
+                                                   abs(sensor_responsiveness)))
+
+        # Try asymptotic method for refined sensor_responsiveness
+        try:
+            asymp = self._try_asymptotic_analysis()
+            if asymp is not None:
+                self.log.info(
+                    "Asymptotic refinement: asymp_T=%.1f",
+                    asymp['asymp_temp'])
+                if 0.001 < asymp['sensor_responsiveness'] < 10.0:
+                    sensor_responsiveness = asymp['sensor_responsiveness']
+        except Exception as e:
+            self.log.info(
+                "Asymptotic analysis skipped (normal for short ramps): %s", e)
+
+        return {
+            'chamber_heat_capacity': chamber_heat_capacity,
+            'sensor_responsiveness': sensor_responsiveness,
+            'post_chamber_temp': end_temp,
+            'post_sensor_temp': end_temp,
+        }
+
+    def _try_asymptotic_analysis(self):
+        """Attempt three-sample asymptotic analysis for refinement.
+
+        Returns dict with asymp_temp and sensor_responsiveness,
+        or None if data is insufficient.
+        """
         above_idx = None
         for i, (t, temp) in enumerate(self.samples):
             if temp > self.threshold_temp and above_idx is None:
@@ -75,70 +150,49 @@ class StepResponseAnalyzer:
             elif temp < self.threshold_temp:
                 above_idx = None
 
-        if above_idx is None or above_idx >= len(self.samples) - 4:
-            raise ValueError(
-                "Not enough samples above threshold %.1f deg C" %
-                self.threshold_temp)
+        if above_idx is None or above_idx >= len(self.samples) - 6:
+            return None
 
-        # Three evenly-spaced samples for asymptotic analysis
         segment = self.samples[above_idx:]
+        if len(segment) < 6:
+            return None
+
         t1_time = segment[0][0] - self.samples[0][0]
         pitch = max(1, len(segment) // 3)
         dt = segment[pitch][0] - segment[0][0]
+        if dt <= 0:
+            return None  # pragma: no cover
+
         t1 = segment[0][1]
         t2 = segment[pitch][1]
         t3 = segment[2 * pitch][1]
 
-        # Asymptotic temperature
         denom = 2.0 * t2 - t1 - t3
         if abs(denom) < 0.01:
-            raise ValueError(
-                "Cannot compute asymptotic temperature - "  # pragma: no cover
-                "samples too close together")
+            return None
+
         asymp_T = (t2 * t2 - t1 * t3) / denom
+        if asymp_T <= t1 or asymp_T <= self.t_ambient:
+            return None
 
-        # Block responsiveness
-        if asymp_T <= t1:
-            raise ValueError(
-                "Asymptotic temperature (%.1f) <= first sample (%.1f)" %  # pragma: no cover
-                (asymp_T, t1))
-        chamber_resp = -math.log((t2 - asymp_T) / (t1 - asymp_T)) / dt
+        ratio = (t2 - asymp_T) / (t1 - asymp_T)
+        if ratio <= 0 or ratio >= 1.0:
+            return None
 
-        # Ambient transfer at asymptotic point
-        ambient_transfer = self.heater_power / (asymp_T - self.t_ambient)
+        chamber_resp = -math.log(ratio) / dt
 
-        # Block heat capacity from maximum rate of rise
-        fastest = self._fastest_rate(segment)
-        chamber_heat_capacity = self.heater_power / fastest[2]
-
-        # Sensor responsiveness
         start_temp = self.samples[0][1]
-        sensor_responsiveness = fastest[2] / (
-            fastest[2] * fastest[0] + self.t_ambient - fastest[1]
-        )
+        exp_term = (start_temp - asymp_T) * math.exp(
+            -chamber_resp * t1_time)
+        denom2 = t1 - asymp_T
+        if abs(denom2) < 0.01:
+            return None  # pragma: no cover
 
-        # Clamp to positive values
-        if chamber_heat_capacity <= 0 or sensor_responsiveness <= 0:
-            self.log.warning(
-                "Analytic identification produced negative values, "
-                "using differential method")
-            chamber_heat_capacity = abs(chamber_heat_capacity)
-            sensor_responsiveness = abs(sensor_responsiveness)
-
-        # Post-heating state estimates
-        heat_time = self.samples[-1][0] - self.samples[0][0]
-        post_chamber_temp = asymp_T + (start_temp - asymp_T) * math.exp(
-            -chamber_resp * heat_time)
-        post_sensor_temp = self.samples[-1][1]
+        sensor_resp = chamber_resp / (1.0 - exp_term / denom2)
 
         return {
-            'chamber_heat_capacity': chamber_heat_capacity,
-            'sensor_responsiveness': sensor_responsiveness,
             'asymp_temp': asymp_T,
-            'chamber_responsiveness': chamber_resp,
-            'ambient_transfer': ambient_transfer,
-            'post_chamber_temp': post_chamber_temp,
-            'post_sensor_temp': post_sensor_temp,
+            'sensor_responsiveness': sensor_resp,
         }
 
     def _fastest_rate(self, samples):

@@ -119,10 +119,13 @@ class MpcChamberCalibrateRunner:
         gcmd.respond_info(
             "Phase 1: Step response to %.0f deg C..." % points[0])
         step_data = self._run_step_response(gcmd, tuning, points[0])
+        heater_power = (self.orig_control.profile.get('heater_power', 0)
+                        if self.orig_control.profile
+                        else self.heater.get_max_power())
+        if heater_power <= 0:
+            heater_power = self.heater.get_max_power()
         analyzer = StepResponseAnalyzer(
-            step_data, self.orig_control.model.heater_power
-            if self.orig_control.model else self.heater.get_max_power(),
-            result.t_ambient)
+            step_data, heater_power, result.t_ambient)
         step_result = analyzer.analyze()
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
         result.sensor_responsiveness = step_result['sensor_responsiveness']
