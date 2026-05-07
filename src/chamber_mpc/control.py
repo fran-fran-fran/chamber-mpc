@@ -223,9 +223,11 @@ class ControlMPCChamber:
         gcmd.respond_info(
             "MPC chamber state: "
             "chamber=%.1f deg C, sensor=%.1f deg C, "
-            "ambient=%.1f deg C, power=%.1f W"
+            "ambient=%.1f deg C, power=%.1f W, "
+            "avg_power=%.1f W (%.0f%%)"
             % (status['temp_chamber'], status['temp_sensor'],
-               status['temp_ambient'], status['power']))
+               status['temp_ambient'], status['power'],
+               status['avg_power'], status['avg_duty'] * 100))
 
     # -- Status for Moonraker --
 

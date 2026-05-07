@@ -50,6 +50,10 @@ class ThermalModel:
         self.last_power = 0.0
         self.last_time = 0.0
 
+        # Rolling power average
+        self._power_history = []
+        self._power_avg_window = 30.0  # seconds
+
         # Bed disturbance (optional)
         self.bed_transfer = 0.0
         self._bed_temp_fn = None  # callable returning (temp, target) tuple
@@ -142,6 +146,12 @@ class ThermalModel:
 
         # -- Store actual power for next propagation --
         self.last_power = u_actual * self.heater_power
+
+        # -- Update rolling power average --
+        self._power_history.append((read_time, u_actual))
+        cutoff = read_time - self._power_avg_window
+        while self._power_history and self._power_history[0][0] < cutoff:
+            self._power_history.pop(0)
 
         return u_actual
 
@@ -295,6 +305,18 @@ class ThermalModel:
 
     # -- Status --
 
+    def get_avg_power(self):
+        if not self._power_history:
+            return 0.0
+        total = sum(duty for _, duty in self._power_history)
+        return total / len(self._power_history) * self.heater_power
+
+    def get_avg_duty(self):
+        if not self._power_history:
+            return 0.0
+        total = sum(duty for _, duty in self._power_history)
+        return total / len(self._power_history)
+
     def get_status(self):
         """Return model state for Moonraker/UI."""
         return {
@@ -302,4 +324,6 @@ class ThermalModel:
             'temp_sensor': round(self.state_sensor_temp, 2),
             'temp_ambient': round(self.state_ambient_temp, 2),
             'power': round(self.last_power, 2),
+            'avg_power': round(self.get_avg_power(), 2),
+            'avg_duty': round(self.get_avg_duty(), 4),
         }
