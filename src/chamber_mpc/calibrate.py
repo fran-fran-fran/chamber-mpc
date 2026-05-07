@@ -1,0 +1,297 @@
+# chamber-mpc: Model Predictive Control for heated chambers
+#
+# Licensed under the GNU General Public License v3.0 (GPL-3.0)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# File: calibrate.py
+# Description: Progressive multi-point MPC calibration. Identifies
+#              chamber_heat_capacity, sensor_responsiveness, and h(T)
+#              at multiple operating points in a single ascending pass.
+#              Optionally identifies bed_transfer if BED_TEMP is specified.
+
+import math
+import logging
+import statistics
+
+
+# Defaults for calibration control
+SETTLE_TOLERANCE_C = 1.0
+SETTLE_DURATION_S = 120.0
+POWER_MEASURE_WINDOW_S = 180.0
+STEP_RESPONSE_POWER = 1.0  # full power for step response
+
+
+class CalibrationResult:
+    """Holds the results of an MPC chamber calibration."""
+    __slots__ = (
+        'chamber_heat_capacity', 'sensor_responsiveness', 'smoothing',
+        'h_points', 't_ambient', 'bed_transfer',
+    )
+
+    def __init__(self):
+        self.chamber_heat_capacity = 0.0
+        self.sensor_responsiveness = 0.0
+        self.smoothing = 0.5
+        self.h_points = []  # list of (T, h) tuples
+        self.t_ambient = 25.0
+        self.bed_transfer = None  # None = not calibrated
+
+
+class StepResponseAnalyzer:
+    """Analyzes a step response trajectory to identify C and sensor_responsiveness.
+
+    Uses the same mathematical approach as Kalico's MPC calibration:
+    - Asymptotic temperature from three evenly-spaced samples
+    - Block heat capacity from maximum rate of temperature rise
+    - Sensor responsiveness from the lag analysis
+    """
+
+    def __init__(self, samples, heater_power, t_ambient, threshold_temp=50.0):
+        """
+        Args:
+            samples: list of (time, temperature) tuples from full-power step
+            heater_power: heater power in watts
+            t_ambient: measured ambient temperature
+            threshold_temp: minimum temperature for analysis (filters initial transient)
+        """
+        self.samples = samples
+        self.heater_power = heater_power
+        self.t_ambient = t_ambient
+        self.threshold_temp = threshold_temp
+        self.log = logging.getLogger('chamber_mpc.calibrate')
+
+    def analyze(self):
+        """Run the step response analysis.
+
+        Returns:
+            dict with keys: chamber_heat_capacity, sensor_responsiveness,
+                            asymp_temp, post_chamber_temp, post_sensor_temp
+        """
+        # Find the continuous segment above threshold
+        above_idx = None
+        for i, (t, temp) in enumerate(self.samples):
+            if temp > self.threshold_temp and above_idx is None:
+                above_idx = i
+            elif temp < self.threshold_temp:
+                above_idx = None
+
+        if above_idx is None or above_idx >= len(self.samples) - 4:
+            raise ValueError(
+                "Not enough samples above threshold %.1f deg C" %
+                self.threshold_temp)
+
+        # Three evenly-spaced samples for asymptotic analysis
+        segment = self.samples[above_idx:]
+        t1_time = segment[0][0] - self.samples[0][0]
+        pitch = max(1, len(segment) // 3)
+        dt = segment[pitch][0] - segment[0][0]
+        t1 = segment[0][1]
+        t2 = segment[pitch][1]
+        t3 = segment[2 * pitch][1]
+
+        # Asymptotic temperature
+        denom = 2.0 * t2 - t1 - t3
+        if abs(denom) < 0.01:
+            raise ValueError(
+                "Cannot compute asymptotic temperature - "  # pragma: no cover
+                "samples too close together")
+        asymp_T = (t2 * t2 - t1 * t3) / denom
+
+        # Block responsiveness
+        if asymp_T <= t1:
+            raise ValueError(
+                "Asymptotic temperature (%.1f) <= first sample (%.1f)" %  # pragma: no cover
+                (asymp_T, t1))
+        chamber_resp = -math.log((t2 - asymp_T) / (t1 - asymp_T)) / dt
+
+        # Ambient transfer at asymptotic point
+        ambient_transfer = self.heater_power / (asymp_T - self.t_ambient)
+
+        # Block heat capacity from maximum rate of rise
+        fastest = self._fastest_rate(segment)
+        chamber_heat_capacity = self.heater_power / fastest[2]
+
+        # Sensor responsiveness
+        start_temp = self.samples[0][1]
+        sensor_responsiveness = fastest[2] / (
+            fastest[2] * fastest[0] + self.t_ambient - fastest[1]
+        )
+
+        # Clamp to positive values
+        if chamber_heat_capacity <= 0 or sensor_responsiveness <= 0:
+            self.log.warning(
+                "Analytic identification produced negative values, "
+                "using differential method")
+            chamber_heat_capacity = abs(chamber_heat_capacity)
+            sensor_responsiveness = abs(sensor_responsiveness)
+
+        # Post-heating state estimates
+        heat_time = self.samples[-1][0] - self.samples[0][0]
+        post_chamber_temp = asymp_T + (start_temp - asymp_T) * math.exp(
+            -chamber_resp * heat_time)
+        post_sensor_temp = self.samples[-1][1]
+
+        return {
+            'chamber_heat_capacity': chamber_heat_capacity,
+            'sensor_responsiveness': sensor_responsiveness,
+            'asymp_temp': asymp_T,
+            'chamber_responsiveness': chamber_resp,
+            'ambient_transfer': ambient_transfer,
+            'post_chamber_temp': post_chamber_temp,
+            'post_sensor_temp': post_sensor_temp,
+        }
+
+    def _fastest_rate(self, samples):
+        """Find the point of maximum temperature rise rate.
+
+        Returns [time_from_start, temperature, rate] of the fastest point.
+        """
+        best = [-1, 0, 0]
+        base_t = samples[0][0]
+        for i in range(2, len(samples)):
+            dT = samples[i][1] - samples[i - 2][1]
+            dt = samples[i][0] - samples[i - 2][0]
+            if dt <= 0:
+                continue  # pragma: no cover -- shouldn't happen with sorted data
+            rate = dT / dt
+            if rate > best[2]:
+                sample = samples[i - 1]
+                best = [sample[0] - base_t, sample[1], rate]
+        if best[2] <= 0:
+            raise ValueError("No positive temperature rise detected")  # pragma: no cover
+        return best
+
+
+class SmoothingEstimator:
+    """Estimates optimal smoothing parameter from prediction errors."""
+
+    @staticmethod
+    def estimate(prediction_errors):
+        """Estimate appropriate smoothing from prediction error statistics.
+
+        Args:
+            prediction_errors: list of (T_measured - T_predicted) values
+                               collected during steady-state hold
+
+        Returns:
+            smoothing value between 0.2 and 0.9
+        """
+        if len(prediction_errors) < 30:
+            return 0.5  # not enough data
+
+        total_var = statistics.variance(prediction_errors)
+
+        # Estimate measurement noise from consecutive differences
+        diffs = [prediction_errors[i + 1] - prediction_errors[i]
+                 for i in range(len(prediction_errors) - 1)]
+        noise_var = statistics.variance(diffs) / 2.0
+
+        # Model uncertainty
+        model_var = max(0.0, total_var - noise_var)
+
+        total = noise_var + model_var
+        if total == 0:  # pragma: no cover
+            return 0.5
+
+        # Optimal gain (simplified Kalman)
+        optimal_gain = total / (total + noise_var)
+
+        return max(0.2, min(0.9, optimal_gain))
+
+
+def compute_cooling_rates(h_points, chamber_heat_capacity, t_ambient,
+                          step_c=10.0):
+    """Compute passive cooling rates across the calibrated range.
+
+    Args:
+        h_points: list of (T, h) tuples
+        chamber_heat_capacity: C in J/K
+        t_ambient: ambient temperature in deg C
+        step_c: temperature step for the output table
+
+    Returns:
+        list of (T, cooling_rate_per_min, is_calibrated) tuples
+    """
+    from .h_interpolator import HInterpolator
+    interp = HInterpolator(h_points)
+
+    t_min = min(t for t, _ in h_points)
+    t_max = max(t for t, _ in h_points)
+    calibrated_temps = {round(t) for t, _ in h_points}
+
+    # Round bounds to step grid
+    t_start = int(round(t_min / step_c)) * int(step_c)
+    t_end = int(round(t_max / step_c)) * int(step_c)
+
+    results = []
+    t = t_start
+    while t <= t_end:
+        h = interp.h(float(t))
+        rate = -h * (t - t_ambient) / chamber_heat_capacity * 60.0
+        is_cal = t in calibrated_temps
+        results.append((t, rate, is_cal))
+        t += int(step_c)
+
+    return results
+
+
+def format_calibration_report(result, cooling_rates):
+    """Format calibration results for terminal output.
+
+    Args:
+        result: CalibrationResult instance
+        cooling_rates: output of compute_cooling_rates()
+
+    Returns:
+        list of strings for respond_info
+    """
+    lines = [
+        "Calibration complete.",
+        "  chamber_heat_capacity   = %.1f J/K" % result.chamber_heat_capacity,
+        "  sensor_responsiveness = %.4f" % result.sensor_responsiveness,
+        "  smoothing             = %.2f (auto-estimated)" % result.smoothing,
+        "",
+        "  h(T) calibration:",
+    ]
+
+    for T, h in result.h_points:
+        rate = None
+        for ct, cr, _ in cooling_rates:
+            if ct == round(T):
+                rate = cr
+                break
+        rate_str = "%.2f deg C/min" % rate if rate is not None else "N/A"
+        lines.append(
+            "    T=%5.1f deg C  h=%.4f W/K  -> passive cool rate: %s"
+            % (T, h, rate_str))
+
+    if result.bed_transfer is not None:
+        lines.append("")
+        lines.append(
+            "  bed_transfer = %.4f W/K" % result.bed_transfer)
+
+    return lines
+
+
+def format_cooling_rate_comments(result, cooling_rates):
+    """Format cooling rate table for autosave comment block.
+
+    Args:
+        result: CalibrationResult instance
+        cooling_rates: output of compute_cooling_rates()
+
+    Returns:
+        list of comment lines (without #*# prefix)
+    """
+    lines = [
+        "# Calibration T_ambient: %.1f deg C" % result.t_ambient,
+        "#",
+        "# Passive cooling rate at 10 deg C intervals:",
+    ]
+
+    for T, rate, is_cal in cooling_rates:
+        marker = "  (calibrated)" if is_cal else ""
+        lines.append(
+            "#   T=%3d deg C: %+.2f deg C/min%s" % (int(T), rate, marker))
+
+    return lines

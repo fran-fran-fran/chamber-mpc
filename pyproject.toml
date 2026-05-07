@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+
+[tool.coverage.run]
+source = ["src/chamber_mpc"]
+omit = [
+    "src/chamber_mpc/__init__.py",
+    "src/chamber_mpc/control.py",
+    "src/chamber_mpc/calibrate_runner.py",
+]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = false
+
+[tool.coverage.paths]
+source = ["src/chamber_mpc"]
