@@ -36,17 +36,6 @@ class ControlMPCChamber:
         self.max_temp_margin = profile.get('max_temp_margin', 5.0)
         self._cap_warned = False
 
-        # Register GCode commands
-        gcode = self.printer.lookup_object('gcode')
-        gcode.register_mux_command(
-            'MPC_CHAMBER_CALIBRATE', 'HEATER', heater.get_name(),
-            self.cmd_MPC_CHAMBER_CALIBRATE,
-            desc="Run MPC chamber calibration")
-        gcode.register_mux_command(
-            'MPC_CHAMBER_STATUS', 'HEATER', heater.get_name(),
-            self.cmd_MPC_CHAMBER_STATUS,
-            desc="Report MPC chamber model state")
-
         # Deferred setup (needs other objects to be loaded)
         self.printer.register_event_handler(
             'klippy:ready', self._handle_ready)

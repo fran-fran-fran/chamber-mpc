@@ -41,6 +41,17 @@ class ChamberMpcModule:
         # Parse all MPC parameters into a profile dict
         self.profile = self._parse_profile(config)
 
+        # Register GCode commands during config loading phase
+        gcode = self.printer.lookup_object('gcode')
+        gcode.register_mux_command(
+            'MPC_CHAMBER_CALIBRATE', 'HEATER', self.heater_name,
+            self.cmd_MPC_CHAMBER_CALIBRATE,
+            desc="Run MPC chamber calibration")
+        gcode.register_mux_command(
+            'MPC_CHAMBER_STATUS', 'HEATER', self.heater_name,
+            self.cmd_MPC_CHAMBER_STATUS,
+            desc="Report MPC chamber model state")
+
         self.printer.register_event_handler(
             'klippy:ready', self._handle_ready)
 
@@ -113,6 +124,18 @@ class ChamberMpcModule:
                 "Run MPC_CHAMBER_CALIBRATE HEATER=%s to calibrate. "
                 "Using default control until then.",
                 self.heater_name, self.heater_name)
+
+    def cmd_MPC_CHAMBER_CALIBRATE(self, gcmd):
+        if self.control is None:
+            raise gcmd.error(
+                "MPC chamber not initialized. Check [chamber_mpc] config.")
+        self.control.cmd_MPC_CHAMBER_CALIBRATE(gcmd)
+
+    def cmd_MPC_CHAMBER_STATUS(self, gcmd):
+        if self.control is None:
+            gcmd.respond_info("MPC chamber: not initialized")
+            return
+        self.control.cmd_MPC_CHAMBER_STATUS(gcmd)
 
     def get_status(self, eventtime):
         """Expose status for Moonraker."""
