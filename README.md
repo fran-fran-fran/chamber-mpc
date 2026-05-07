@@ -62,22 +62,22 @@ bed_transfer: 0.35
 
 ### Configuration reference
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `heater` | (required) | Name of the `[heater_generic]` to control |
-| `heater_power` | (required) | Heater nameplate power in watts |
-| `chamber_heat_capacity` | (calibrated) | Thermal mass in J/K |
-| `sensor_responsiveness` | (calibrated) | Sensor lag coefficient |
-| `smoothing` | 0.5 | Model correction aggressiveness (0.0-1.0) |
-| `target_reach_time` | 2.0 | Prediction horizon in seconds |
-| `max_temp_margin` | 5.0 | Setpoint clamped to max_temp minus this margin |
-| `h_calibration_points` | (calibrated) | Temperature-dependent h(T) values |
-| `heating_element_sensor` | (none) | Name of `[temperature_sensor]` on heating element |
-| `heating_element_max_temp` | 300.0 | Element temperature hard limit |
-| `heating_element_margin` | 20.0 | Proportional pullback zone width |
-| `bed_heater` | (none) | Name of bed heater for disturbance feedforward |
-| `bed_transfer` | 0.0 | Bed-to-chamber heat transfer coefficient in W/K |
-| `ambient_temp_sensor` | (none) | External ambient temperature sensor |
+| Parameter | Requirement | Default | Description |
+|-----------|-------------|---------|-------------|
+| `heater` | required | none | Name of the `[heater_generic]` to control |
+| `heater_power` | required | none | Heater nameplate power in watts |
+| `chamber_heat_capacity` | required | calibrated | Thermal mass in J/K |
+| `sensor_responsiveness` | required | calibrated | Sensor lag coefficient |
+| `smoothing` | optional | 0.5 | Model correction aggressiveness (0.0-1.0) |
+| `target_reach_time` | optional| 2.0 | Prediction horizon in seconds |
+| `max_temp_margin` | optional | 5.0 | Setpoint clamped to max_temp minus this margin (to avoid a shutdown due to temperature overshoot) |
+| `h_calibration_points` | required | calibrated | Temperature-dependent h(T) values |
+| `heating_element_sensor` | optional | none | Name of `[temperature_sensor]` on heating element |
+| `heating_element_max_temp` | optional | 300.0 | Heating element temperature hard limit (deg C) |
+| `heating_element_margin` | optional | 20.0 | Zone below the hard limit where output starts tapering down proportionally (deg C) |
+| `bed_heater` | optional | none | Name of bed heater for disturbance feedforward |
+| `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient in W/K |
+| `ambient_temp_sensor` | optional | none | External ambient temperature sensor |
 
 ## Calibration
 
