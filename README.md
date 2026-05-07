@@ -70,7 +70,7 @@ bed_transfer: 0.35
 | `sensor_responsiveness` | required | calibrated | Sensor lag coefficient |
 | `smoothing` | optional | 0.5 | Model correction aggressiveness (0.0-1.0) |
 | `target_reach_time` | optional| 2.0 | Prediction horizon in seconds |
-| `max_temp_margin` | optional | 5.0 | The control setpoint is clamped to the heater's max_temp minus this margin (to avoid shutdowns due to temperature overshoot) |
+| `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the heater's max_temp minus this margin (to avoid shutdowns due to temperature overshoot) |
 | `h_calibration_points` | required | calibrated | Temperature-dependent h(T) values |
 | `heating_element_sensor` | optional | none | Name of `[temperature_sensor]` on heating element |
 | `heating_element_max_temp` | optional | 300.0 | Heating element temperature hard limit (deg C) |
