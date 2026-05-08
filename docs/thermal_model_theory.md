@@ -16,7 +16,7 @@ from two configuration parameters:
 ## Basic Model (2-state)
 
 Two states: chamber temperature $T_c$ and sensor temperature $T_s$.
-One measurement: $y = T_{s2}$ (the chamber sensor reading).
+One measurement: $y = T_s$ (the chamber sensor reading).
 
 ### Dynamics
 
