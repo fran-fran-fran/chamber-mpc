@@ -188,7 +188,10 @@ $$\mathbf{P} \leftarrow (\mathbf{I} - \mathbf{K} \, \mathbf{H}) \, \mathbf{P}^-$
 ### Basic model matrices
 
 ```math
-\mathbf{x} = \begin{bmatrix} T_c \\ T_s \end{bmatrix}, \quad \mathbf{H} = \begin{bmatrix} 0 & 1 \end{bmatrix}, \quad \mathbf{Q} = \begin{bmatrix} q_c & 0 \\ 0 & q_s \end{bmatrix}, \quad R = r
+\mathbf{x} = \begin{bmatrix} T_c \\ T_s \end{bmatrix}
+, \quad \mathbf{H} = \begin{bmatrix} 0 & 1 \end{bmatrix}
+, \quad \mathbf{Q} = \begin{bmatrix} q_c & 0 \\ 0 & q_s \end{bmatrix}
+, \quad R = r
 ```
 
 The gain vector $\mathbf{K} = [K_c, K_s]^T$ provides different corrections
@@ -199,8 +202,10 @@ to the chamber state than to the sensor state.
 ### Advanced model matrices
 
 ```math
-\mathbf{x} = \begin{bmatrix} T_h \\ T_c \\ T_{s1} \\ T_{s2} \end{bmatrix}, \quad \mathbf{H} = \begin{bmatrix} 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix}
-,\quad  \mathbf{Q} = \text{diag}(q_h, q_c, q_{s1}, q_{s2}), \quad \mathbf{R} = \begin{bmatrix} r_1 & 0 \\ 0 & r_2 \end{bmatrix}
+\mathbf{x} = \begin{bmatrix} T_h \\ T_c \\ T_{s1} \\ T_{s2} \end{bmatrix}
+, \quad \mathbf{H} = \begin{bmatrix} 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix}
+, \quad  \mathbf{Q} = \begin{bmatrix} q_h & 0 & 0 & 0 \\ 0 & q_c & 0 & 0 \\ 0 & 0 & q_{s1} & 0 \\ 0 & 0 & 0 & q_{s2} \end{bmatrix}
+, \quad \mathbf{R} = \begin{bmatrix} r_1 & 0 \\ 0 & r_2 \end{bmatrix}
 ```
 
 The gain matrix $\mathbf{K}$ is $4 \times 2$: each of the four states
