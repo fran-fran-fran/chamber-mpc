@@ -23,14 +23,14 @@ class ThermalModel:
         state_ambient_temp: estimated ambient temperature (deg C)
 
     Model equation:
-        C * dT_block/dt = P_heater + P_bed - h(T) * (T_block - T_ambient)
-        dT_sensor/dt = sensor_responsiveness * (T_block - T_sensor)
+        C * dT_chamber/dt = P_heater + P_bed - h(T) * (T_chamber - T_ambient)
+        dT_sensor/dt = sensor_responsiveness * (T_chamber - T_sensor)
     """
 
     def __init__(self, chamber_heat_capacity, sensor_responsiveness,
                  h_interpolator, heater_power, smoothing=0.5,
-                 target_reach_time=2.0, min_ambient_change=1.0,
-                 steady_state_rate=0.5):
+                 target_reach_time=2.0,
+                 estimator_type='fixed', kalman_filter=None):
         # Identified parameters
         self.chamber_heat_capacity = float(chamber_heat_capacity)
         self.sensor_responsiveness = float(sensor_responsiveness)
@@ -40,6 +40,10 @@ class ThermalModel:
         # Tuning parameters
         self.smoothing = float(smoothing)
         self.target_reach_time = float(target_reach_time)
+
+        # Estimator
+        self.estimator_type = estimator_type
+        self.kalman = kalman_filter
 
         # State
         self.state_chamber_temp = AMBIENT_TEMP_DEFAULT
@@ -172,11 +176,11 @@ class ThermalModel:
                 pass  # pragma: no cover -- sensor read failure, skip feedforward
 
         # Chamber temperature update
-        dT_block = (
+        dT_chamber = (
             (p_heating + p_bed - p_loss_ambient) * dt
             / self.chamber_heat_capacity
         )
-        self.state_chamber_temp += dT_block
+        self.state_chamber_temp += dT_chamber
 
         # Sensor temperature update (lagged response)
         dT_sensor = (
@@ -185,13 +189,28 @@ class ThermalModel:
         )
         self.state_sensor_temp += dT_sensor
 
+        # Kalman predict step
+        if self.estimator_type == 'kalman' and self.kalman is not None:
+            self.kalman.predict(dt, self.sensor_responsiveness)
+
     def _correct(self, dt, temp_measured):
-        """Correct model state by blending prediction with measurement."""
-        effective_smoothing = 1.0 - (1.0 - self.smoothing) ** dt
-        adjustment = (temp_measured - self.state_sensor_temp) * effective_smoothing
-        # Apply correction to both states (Kalico pattern)
-        self.state_chamber_temp += adjustment
-        self.state_sensor_temp += adjustment
+        """Correct model state from measurement.
+
+        Fixed mode: equal correction to both states (Kalico pattern).
+        Kalman mode: per-state optimal gains from covariance.
+        """
+        innovation = temp_measured - self.state_sensor_temp
+
+        if self.estimator_type == 'kalman' and self.kalman is not None:
+            corr_chamber, corr_sensor = self.kalman.update(innovation)
+            self.state_chamber_temp += corr_chamber
+            self.state_sensor_temp += corr_sensor
+        else:
+            effective_smoothing = 1.0 - (1.0 - self.smoothing) ** dt
+            adjustment = innovation * effective_smoothing
+            # Apply correction to both states (Kalico pattern)
+            self.state_chamber_temp += adjustment
+            self.state_sensor_temp += adjustment
 
     def _update_ambient(self, dt, read_time):
         """Update ambient temperature estimate.

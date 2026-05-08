@@ -39,7 +39,7 @@ class TestModelInitialization:
 
 
 class TestModelUpdate:
-    def test_heating_increases_block_temp(self):
+    def test_heating_increases_chamber_temp(self):
         model = make_model()
         model.set_initial_state(25.0)
         model.set_ambient(25.0)
@@ -238,3 +238,63 @@ class TestGetStatus:
         status = model.get_status()
         assert status['temp_chamber'] == pytest.approx(85.0)
         assert status['temp_ambient'] == pytest.approx(22.0)
+
+
+class TestBasicKalmanEstimator:
+    def test_kalman_mode_runs(self):
+        from chamber_mpc.kalman import KalmanFilter2
+        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        h_interp = HInterpolator([(100.0, 0.15)])
+        model = ThermalModel(
+            chamber_heat_capacity=360.0,
+            sensor_responsiveness=0.08,
+            h_interpolator=h_interp,
+            heater_power=1800.0,
+            estimator_type='kalman',
+            kalman_filter=kalman,
+        )
+        model.set_initial_state(25.0)
+        model.set_ambient(25.0)
+        for i in range(10):
+            model.update(0.1 + i * 0.3, 26.0, 100.0, 1.0)
+        assert model.state_chamber_temp > 25.0
+
+    def test_kalman_gives_different_gains_per_state(self):
+        from chamber_mpc.kalman import KalmanFilter2
+        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        h_interp = HInterpolator([(100.0, 0.15)])
+        model = ThermalModel(
+            chamber_heat_capacity=360.0,
+            sensor_responsiveness=0.08,
+            h_interpolator=h_interp,
+            heater_power=1800.0,
+            estimator_type='kalman',
+            kalman_filter=kalman,
+        )
+        model.set_initial_state(100.0)
+        model.set_ambient(22.0)
+        # Run a few ticks to let gains converge
+        for i in range(20):
+            model.update(0.1 + i * 0.3, 100.5, 100.0, 1.0)
+        k_chamber, k_sensor = kalman.get_gains()
+        # Sensor gain should differ from chamber gain
+        assert k_chamber != k_sensor
+
+    def test_kalman_no_crash_with_large_innovation(self):
+        from chamber_mpc.kalman import KalmanFilter2
+        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        h_interp = HInterpolator([(100.0, 0.15)])
+        model = ThermalModel(
+            chamber_heat_capacity=360.0,
+            sensor_responsiveness=0.08,
+            h_interpolator=h_interp,
+            heater_power=1800.0,
+            estimator_type='kalman',
+            kalman_filter=kalman,
+        )
+        model.set_initial_state(25.0)
+        model.set_ambient(25.0)
+        # Large measurement jump - should not crash or produce NaN
+        duty = model.update(0.1, 200.0, 100.0, 1.0)
+        assert duty >= 0.0
+        assert duty <= 1.0

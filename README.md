@@ -131,6 +131,11 @@ Each control tick:
 
 The model propagation uses the actual applied power (after constraints), not the desired power. This prevents integral windup when the heating element limiter is active.
 
+## Thermal Model and Control Theory
+
+For the full mathematical formulation of the thermal models, state estimation
+algorithms, and control law, see [docs/thermal_model_theory.md](docs/thermal_model_theory.md).
+
 ## Development
 
 ```bash
@@ -144,7 +149,9 @@ chamber-mpc/
 +-- src/chamber_mpc/
 |   +-- __init__.py            # Klippy entry point, heater control registration
 |   +-- __version__.py         # Version
-|   +-- thermal_model.py       # Two-state thermal model with h(T) and constraints
+|   +-- thermal_model.py       # Two-state basic model (T_chamber + T_sensor)
+|   +-- thermal_model_advanced.py # Four-state advanced model (T_heater + T_chamber + T_s1 + T_s2)
+|   +-- kalman.py              # Kalman filters for 2-state and 4-state models
 |   +-- h_interpolator.py      # h(T) interpolation from calibration points
 |   +-- control.py             # Klipper heater control interface
 |   +-- calibrate.py           # Calibration analysis (step response, smoothing)
