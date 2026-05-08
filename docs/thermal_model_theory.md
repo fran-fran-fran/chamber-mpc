@@ -22,14 +22,14 @@ One measurement: $y = T_s$ (the chamber sensor reading).
 
 $$C_c \frac{dT_c}{dt} = P - h(T_c) \cdot (T_c - T_{amb})$$
 
-$$\frac{dT_s}{dt} = r_{s2} \cdot (T_c - T_s)$$
+$$\frac{dT_s}{dt} = r_s \cdot (T_c - T_s)$$
 
 where:
 - $C_c$ is the chamber thermal mass (J/K), identified as `chamber_heat_capacity`
 - $P$ is the applied heater power (W)
 - $h(T_c)$ is the temperature-dependent ambient heat transfer coefficient (W/K), interpolated from `h_calibration_points`
 - $T_{amb}$ is the ambient temperature (deg C), from `ambient_temp` config or external sensor
-- $r_{s2}$ is the sensor responsiveness (1/s), identified as `sensor_responsiveness`
+- $r_{s}$ is the sensor responsiveness (1/s), identified as `sensor_responsiveness`
 
 ### Optional bed disturbance feedforward
 
