@@ -40,8 +40,6 @@ class ThermalModel:
         # Tuning parameters
         self.smoothing = float(smoothing)
         self.target_reach_time = float(target_reach_time)
-        self.min_ambient_change = float(min_ambient_change)
-        self.steady_state_rate = float(steady_state_rate)
 
         # State
         self.state_chamber_temp = AMBIENT_TEMP_DEFAULT
@@ -60,12 +58,11 @@ class ThermalModel:
 
         # Heating element limit (optional)
         self._heating_element_temp_fn = None
-        self.heating_element_max_temp = 300.0
+        self.heating_element_max_temp = 250.0
         self.heating_element_margin = 20.0
 
         # Ambient sensor (optional)
         self._ambient_temp_fn = None
-        self.want_ambient_refresh = False
 
     def set_initial_state(self, temp):
         """Set initial state from a known temperature."""
@@ -105,7 +102,6 @@ class ThermalModel:
             temp_fn: callable(read_time) returning (temp, target) tuple
         """
         self._ambient_temp_fn = temp_fn
-        self.want_ambient_refresh = True
 
     # -- Main update cycle --
 
@@ -200,44 +196,24 @@ class ThermalModel:
     def _update_ambient(self, dt, read_time):
         """Update ambient temperature estimate.
 
-        Conservative approach: only adjust when the system is genuinely
-        near steady state (small model-sensor gap AND small temperature
-        rate of change). This prevents runaway ambient drift during
-        transients like startup, large setpoint changes, or overshoot.
+        For chambers, adaptive ambient estimation is disabled by default
+        because persistent model-sensor bias gets misattributed as ambient
+        drift. Instead, ambient is set from:
+        1. An external ambient sensor (if configured) - updated every tick
+        2. The saved ambient_temp from calibration (default)
+
+        The Kalico hotend MPC uses adaptive estimation because hotend
+        dynamics are fast and model errors are small. Chamber dynamics
+        are slow and small biases in h or sensor_responsiveness cause
+        the adaptive estimator to drift over minutes.
         """
-        # Use external sensor if available (overrides adaptive estimation)
-        if self.want_ambient_refresh and self._ambient_temp_fn is not None:  # pragma: no cover
+        if self._ambient_temp_fn is not None:  # pragma: no cover
             try:
                 temp, _ = self._ambient_temp_fn(read_time)
                 if temp != 0.0:
                     self.state_ambient_temp = temp
-                    self.want_ambient_refresh = False
-                    return
             except Exception:
                 pass  # sensor read failure
-
-        # Adaptive ambient estimation - very conservative for chambers
-        # Only adjust when ALL conditions are met:
-        # 1. Heater is partially on (not off or fully saturated)
-        # 2. Model and sensor are close (system is settled)
-        # 3. Temperature is not changing rapidly
-        model_sensor_gap = abs(
-            self.state_chamber_temp - self.state_sensor_temp)
-        if model_sensor_gap > 2.0:
-            return  # model hasn't converged yet, don't adjust ambient
-
-        if not (0 < self.last_power < self.heater_power * 0.95):
-            return  # heater is off or saturated, measurement unreliable
-
-        # Very small adjustment rate for chambers (0.01 deg C/s max)
-        max_rate = 0.01
-        error = self.state_sensor_temp - self.state_chamber_temp
-        delta = max(-max_rate * dt, min(max_rate * dt, error * 0.1 * dt))
-        self.state_ambient_temp += delta
-
-        # Clamp ambient to reasonable range
-        self.state_ambient_temp = max(
-            -10.0, min(50.0, self.state_ambient_temp))
 
     def _compute_output(self, target_temp, read_time, max_power):
         """Compute desired heater output."""
@@ -306,12 +282,14 @@ class ThermalModel:
     # -- Status --
 
     def get_avg_power(self):
+        """Return average heater power over the rolling window."""
         if not self._power_history:
             return 0.0
         total = sum(duty for _, duty in self._power_history)
         return total / len(self._power_history) * self.heater_power
 
     def get_avg_duty(self):
+        """Return average duty cycle (0.0-1.0) over the rolling window."""
         if not self._power_history:
             return 0.0
         total = sum(duty for _, duty in self._power_history)

@@ -81,10 +81,6 @@ class ChamberMpcModule:
         profile['smoothing'] = config.getfloat('smoothing', 0.5)
         profile['target_reach_time'] = config.getfloat(
             'target_reach_time', 2.0)
-        profile['min_ambient_change'] = config.getfloat(
-            'min_ambient_change', 1.0)
-        profile['steady_state_rate'] = config.getfloat(
-            'steady_state_rate', 0.5)
         profile['ambient_temp'] = config.getfloat(
             'ambient_temp', 25.0)
         profile['max_temp_margin'] = config.getfloat(
@@ -99,7 +95,7 @@ class ChamberMpcModule:
         profile['heating_element_sensor'] = config.get(
             'heating_element_sensor', default=None)
         profile['heating_element_max_temp'] = config.getfloat(
-            'heating_element_max_temp', 300.0)
+            'heating_element_max_temp', 250.0)
         profile['heating_element_margin'] = config.getfloat(
             'heating_element_margin', 20.0)
 

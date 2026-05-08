@@ -94,10 +94,16 @@ MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70
 MPC_CHAMBER_CALIBRATE HEATER=airfryer POINTS=60,100,150,200
 ```
 
+### With known ambient temperature (chamber already warm)
+
+```gcode
+MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=80,130 T_AMBIENT=28
+```
+
 ### With bed transfer measurement
 
 ```gcode
-MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=110
+MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=110 T_AMBIENT=25
 ```
 
 Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to printer.cfg.
@@ -106,7 +112,7 @@ Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to pri
 
 | Command | Parameters | Description |
 |---------|-----------|-------------|
-| `MPC_CHAMBER_CALIBRATE` | `HEATER=` `POINTS=` `BED_TEMP=` | Run calibration |
+| `MPC_CHAMBER_CALIBRATE` | `HEATER=` `POINTS=` `T_AMBIENT=` `BED_TEMP=` | Run calibration |
 | `MPC_CHAMBER_STATUS` | `HEATER=` | Report model state |
 
 ## How it works

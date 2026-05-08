@@ -228,6 +228,8 @@ class TestGetStatus:
         assert 'temp_sensor' in status
         assert 'temp_ambient' in status
         assert 'power' in status
+        assert 'avg_power' in status
+        assert 'avg_duty' in status
 
     def test_status_reflects_state(self):
         model = make_model()

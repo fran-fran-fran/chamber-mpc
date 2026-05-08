@@ -67,8 +67,6 @@ class ControlMPCChamber:
         # Tuning parameters
         smoothing = profile.get('smoothing', 0.5)
         target_reach_time = profile.get('target_reach_time', 2.0)
-        min_ambient_change = profile.get('min_ambient_change', 1.0)
-        steady_state_rate = profile.get('steady_state_rate', 0.5)
 
         # Build model (may be incomplete if not yet calibrated)
         if chamber_heat_capacity and sensor_responsiveness and h_interp:
@@ -79,8 +77,6 @@ class ControlMPCChamber:
                 heater_power=heater_power,
                 smoothing=smoothing,
                 target_reach_time=target_reach_time,
-                min_ambient_change=min_ambient_change,
-                steady_state_rate=steady_state_rate,
             )
             if not load_clean:
                 temp = self.heater.get_temp(
@@ -100,7 +96,7 @@ class ControlMPCChamber:
         self._heating_element_sensor_name = profile.get(
             'heating_element_sensor', None)
         self._heating_element_max_temp = profile.get(
-            'heating_element_max_temp', 300.0)
+            'heating_element_max_temp', 250.0)
         self._heating_element_margin = profile.get(
             'heating_element_margin', 20.0)
         self._ambient_sensor_name = profile.get(

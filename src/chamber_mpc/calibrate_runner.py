@@ -119,6 +119,7 @@ class MpcChamberCalibrateRunner:
         points = [float(p.strip()) for p in points_str.split(',')]
         points.sort()
         bed_temp = gcmd.get_float('BED_TEMP', default=None)
+        t_ambient_override = gcmd.get_float('T_AMBIENT', default=None)
 
         if not points:
             raise gcmd.error("POINTS must specify at least one temperature")
@@ -136,7 +137,8 @@ class MpcChamberCalibrateRunner:
 
         try:
             result = self._run_calibration(
-                gcmd, tuning, pid_control, points, bed_temp)
+                gcmd, tuning, pid_control, points, bed_temp,
+                t_ambient_override)
             self._save_results(gcmd, result)
         except self.printer.command_error as e:
             raise gcmd.error("Calibration failed: %s" % e)
@@ -145,7 +147,8 @@ class MpcChamberCalibrateRunner:
             self.heater.set_control(pid_control)
             self.heater.set_temp(0.0)
 
-    def _run_calibration(self, gcmd, tuning, pid_control, points, bed_temp):
+    def _run_calibration(self, gcmd, tuning, pid_control, points, bed_temp,
+                         t_ambient_override=None):
         """Execute the calibration sequence."""
         result = CalibrationResult()
 
@@ -159,12 +162,24 @@ class MpcChamberCalibrateRunner:
                 "WARNING: heater_power not set in [chamber_mpc], "
                 "using max_power=%.0f (this may be incorrect)" % heater_power)
 
-        # Phase 0: measure ambient (tuning control already active with output=0)
-        gcmd.respond_info("Phase 0: Measuring ambient temperature...")
+        # Phase 0: ambient temperature and starting conditions
         tuning.set_output(0.0, 0.0)
-        result.t_ambient = self._measure_ambient()
-        gcmd.respond_info(
-            "  T_ambient = %.1f deg C" % result.t_ambient)
+        if t_ambient_override is not None:
+            result.t_ambient = t_ambient_override
+            gcmd.respond_info(
+                "Phase 0: Using provided T_ambient = %.1f deg C"
+                % result.t_ambient)
+            # Still wait for temperature to stabilize (equilibrium)
+            gcmd.respond_info(
+                "  Waiting for temperature to stabilize...")
+            t_start = self._wait_for_stability()
+            gcmd.respond_info(
+                "  Starting temperature = %.1f deg C" % t_start)
+        else:
+            gcmd.respond_info("Phase 0: Measuring ambient temperature...")
+            result.t_ambient = self._measure_ambient()
+            gcmd.respond_info(
+                "  T_ambient = %.1f deg C" % result.t_ambient)
 
         # Phase 1: step response from ambient to first point
         gcmd.respond_info(
@@ -231,6 +246,32 @@ class MpcChamberCalibrateRunner:
             dt = samples[-1][1] - samples[0][1]
             rate = abs(dt / duration)
             return rate > 0.05  # wait until < 0.05 deg C/s drift
+
+        self.printer.wait_while(process)
+        return samples[-1][1]
+
+    def _wait_for_stability(self):
+        """Wait for temperature to stop changing, return stabilized value.
+
+        Unlike _measure_ambient, this does not assume the stabilized
+        temperature is the ambient temperature. Used when T_AMBIENT is
+        provided and the chamber may be warm but in equilibrium.
+        """
+        samples = []
+
+        def process(eventtime):
+            temp, _ = self.heater.get_temp(eventtime)
+            samples.append((eventtime, temp))
+            while samples and samples[0][0] < eventtime - 30.0:
+                samples.pop(0)
+            if len(samples) < 30:
+                return True
+            duration = samples[-1][0] - samples[0][0]
+            if duration < 10.0:
+                return True
+            dt = samples[-1][1] - samples[0][1]
+            rate = abs(dt / duration)
+            return rate > 0.05
 
         self.printer.wait_while(process)
         return samples[-1][1]
