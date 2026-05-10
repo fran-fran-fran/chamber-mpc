@@ -5,20 +5,26 @@
 #
 # File: calibrate_runner.py
 # Description: Orchestrates the MPC chamber calibration sequence within
-#              Klipper's reactor. Drives the heater, collects measurements,
-#              and delegates analysis to calibrate.py.
+#              Klipper's reactor.
 #
-#              Phase 0-2 use the heater's existing controller (typically PID)
-#              for temperature holding. Phase 3 (optional bed transfer) uses
-#              a fully calibrated MPC model since all chamber parameters are
-#              known by that point.
+#              The calibration is fully self-bootstrapping:
+#              - Phase 0: Measure or accept ambient temperature
+#              - Phase 1: Open-loop step response to first target
+#                         (identifies C, sensor_responsiveness, rough h)
+#              - Phase 2: MPC holds at each target using progressively
+#                         refined parameters (identifies h at each point)
+#              - Phase 3: Optional bed transfer measurement using
+#                         fully calibrated MPC
+#              - Phase 4: Estimate smoothing from prediction errors
+#
+#              No PID or other external controller is needed.
 
 import logging
 
 from .calibrate import (
     StepResponseAnalyzer, SmoothingEstimator, CalibrationResult,
+    estimate_h_from_arrival,
     compute_cooling_rates, format_calibration_report,
-    format_cooling_rate_comments,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
     STEP_RESPONSE_POWER,
 )
@@ -64,10 +70,10 @@ class TuningControl:
 
 
 class _MpcHoldControl:
-    """Temporary control using a fully calibrated MPC model.
+    """Temporary control using an MPC model for temperature holding.
 
-    Used only during Phase 3 (bed transfer measurement) where all chamber
-    parameters are already identified and MPC provides better holding than PID.
+    Used during calibration steady-state holds (Phase 2 onward).
+    The model is progressively refined as more h points are identified.
     """
 
     def __init__(self, heater, model, target):
@@ -98,12 +104,17 @@ class _MpcHoldControl:
 class MpcChamberCalibrateRunner:
     """Runs the MPC chamber calibration sequence.
 
+    Fully self-bootstrapping: the step response identifies enough
+    parameters for MPC to hold temperature, then MPC holds at each
+    calibration point while steady-state power is measured.
+    No PID or external controller is needed.
+
     Sequence:
-        Phase 0: Measure T_ambient (chamber at room temperature)
-        Phase 1: Step response to first point (identify C, sensor_resp)
-        Phase 2: Steady-state holds using existing PID (identify h at each point)
+        Phase 0: Measure T_ambient (or accept from T_AMBIENT parameter)
+        Phase 1: Step response to first point (identify C, sensor_resp, rough h)
+        Phase 2: MPC holds at each point (identify h at each temperature)
         Phase 3: Optional bed transfer using calibrated MPC (identify h_bed)
-        Phase 4: Estimate smoothing, compute results, save
+        Phase 4: Estimate smoothing from prediction errors, save results
     """
 
     def __init__(self, printer, heater, orig_control):
@@ -130,24 +141,22 @@ class MpcChamberCalibrateRunner:
                     "Calibration point %.0f deg C is outside safe range "
                     "[30, %.0f]" % (p, self.heater.max_temp - 10))
 
-        # Capture the original control (typically PID) by swapping
-        # in a temporary control - set_control() returns the old one
+        # Swap in tuning control for open-loop phases
         tuning = TuningControl(self.heater)
-        pid_control = self.heater.set_control(tuning)
+        old_control = self.heater.set_control(tuning)
 
         try:
             result = self._run_calibration(
-                gcmd, tuning, pid_control, points, bed_temp,
-                t_ambient_override)
+                gcmd, tuning, points, bed_temp, t_ambient_override)
             self._save_results(gcmd, result)
         except self.printer.command_error as e:
             raise gcmd.error("Calibration failed: %s" % e)
         finally:
             # Always restore original control and turn off heater
-            self.heater.set_control(pid_control)
+            self.heater.set_control(old_control)
             self.heater.set_temp(0.0)
 
-    def _run_calibration(self, gcmd, tuning, pid_control, points, bed_temp,
+    def _run_calibration(self, gcmd, tuning, points, bed_temp,
                          t_ambient_override=None):
         """Execute the calibration sequence."""
         result = CalibrationResult()
@@ -162,19 +171,16 @@ class MpcChamberCalibrateRunner:
                 "WARNING: heater_power not set in [chamber_mpc], "
                 "using max_power=%.0f (this may be incorrect)" % heater_power)
 
-        # Phase 0: ambient temperature and starting conditions
+        # Phase 0: ambient temperature
         tuning.set_output(0.0, 0.0)
         if t_ambient_override is not None:
             result.t_ambient = t_ambient_override
             gcmd.respond_info(
                 "Phase 0: Using provided T_ambient = %.1f deg C"
                 % result.t_ambient)
-            # Still wait for temperature to stabilize (equilibrium)
             gcmd.respond_info(
                 "  Waiting for temperature to stabilize...")
-            t_start = self._wait_for_stability()
-            gcmd.respond_info(
-                "  Starting temperature = %.1f deg C" % t_start)
+            self._wait_for_stability()
         else:
             gcmd.respond_info("Phase 0: Measuring ambient temperature...")
             result.t_ambient = self._measure_ambient()
@@ -190,26 +196,68 @@ class MpcChamberCalibrateRunner:
         step_result = analyzer.analyze()
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
         result.sensor_responsiveness = step_result['sensor_responsiveness']
-        gcmd.respond_info(
-            "  C = %.1f J/K, sensor_resp = %.4f"
-            % (result.chamber_heat_capacity, result.sensor_responsiveness))
 
-        # Phase 2: steady-state holds using existing PID
+        # Compute rough h from arrival data
+        rough_h = estimate_h_from_arrival(
+            step_data, heater_power,
+            result.chamber_heat_capacity, result.t_ambient)
+
         gcmd.respond_info(
-            "Phase 2: Steady-state measurements (using PID to hold)...")
-        self.heater.set_control(pid_control)
+            "  C = %.1f J/K, sensor_resp = %.4f, rough h = %.3f W/K"
+            % (result.chamber_heat_capacity, result.sensor_responsiveness,
+               rough_h))
+
+        # Phase 2: progressive steady-state holds using self-bootstrapping MPC
+        gcmd.respond_info(
+            "Phase 2: Steady-state measurements (MPC self-bootstrapping)...")
 
         all_prediction_errors = []
         for i, target in enumerate(points):
             gcmd.respond_info(
                 "  Point %d/%d: %.0f deg C" % (i + 1, len(points), target))
-            h, errors = self._measure_steady_state_with_pid(
-                gcmd, target, result, heater_power)
+
+            # Build MPC model with best available parameters
+            h_points_so_far = list(result.h_points)
+            if not h_points_so_far:
+                # First point: use rough h from step response
+                h_points_so_far = [(target, rough_h)]
+            model = self._build_model(
+                result, h_points_so_far, heater_power)
+
+            # MPC holds at target
+            hold = _MpcHoldControl(self.heater, model, target)
+            self.heater.set_control(hold)
+            self.heater.set_temp(target)
+
+            # Wait for temperature to settle
+            gcmd.respond_info("    Waiting for steady state...")
+            self._wait_settle(target)
+
+            # Measure steady-state power
+            gcmd.respond_info("    Measuring steady-state power...")
+            avg_duty = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
+            avg_power_watts = avg_duty * heater_power
+
+            # Compute h at this temperature
+            delta_T = target - result.t_ambient
+            if delta_T <= 0:
+                raise self.printer.command_error(
+                    "Target %.1f <= ambient %.1f, cannot compute h"
+                    % (target, result.t_ambient))
+            h = avg_power_watts / delta_T
             result.h_points.append((target, h))
-            all_prediction_errors.extend(errors)
             gcmd.respond_info("    h = %.4f W/K" % h)
 
-        # Phase 3: optional bed transfer using calibrated MPC
+            # Collect prediction errors for smoothing estimation
+            errors = self._collect_prediction_errors(model, 60.0)
+            all_prediction_errors.extend(errors)
+
+            # Swap back to tuning control between points
+            # (MPC will be rebuilt with updated h points for next target)
+            self.heater.set_control(tuning)
+            tuning.set_output(0.0, target)
+
+        # Phase 3: optional bed transfer using fully calibrated MPC
         if bed_temp is not None:
             gcmd.respond_info(
                 "Phase 3: Bed transfer measurement at bed=%.0f deg C..."
@@ -226,37 +274,27 @@ class MpcChamberCalibrateRunner:
 
         return result
 
+    # -- Model building --
+
+    def _build_model(self, result, h_points, heater_power):
+        """Build a ThermalModel from current best parameters."""
+        model = ThermalModel(
+            chamber_heat_capacity=result.chamber_heat_capacity,
+            sensor_responsiveness=result.sensor_responsiveness,
+            h_interpolator=HInterpolator(h_points),
+            heater_power=heater_power,
+            smoothing=0.5,
+        )
+        current_temp, _ = self.heater.get_temp(
+            self.heater.reactor.monotonic())
+        model.set_initial_state(current_temp)
+        model.set_ambient(result.t_ambient)
+        return model
+
     # -- Phase 0: Ambient measurement --
 
     def _measure_ambient(self):
         """Wait for temperature to stabilize and record ambient."""
-        samples = []
-
-        def process(eventtime):
-            temp, _ = self.heater.get_temp(eventtime)
-            samples.append((eventtime, temp))
-            # Keep last 30s of samples
-            while samples and samples[0][0] < eventtime - 30.0:
-                samples.pop(0)
-            if len(samples) < 30:
-                return True
-            duration = samples[-1][0] - samples[0][0]
-            if duration < 10.0:
-                return True
-            dt = samples[-1][1] - samples[0][1]
-            rate = abs(dt / duration)
-            return rate > 0.05  # wait until < 0.05 deg C/s drift
-
-        self.printer.wait_while(process)
-        return samples[-1][1]
-
-    def _wait_for_stability(self):
-        """Wait for temperature to stop changing, return stabilized value.
-
-        Unlike _measure_ambient, this does not assume the stabilized
-        temperature is the ambient temperature. Used when T_AMBIENT is
-        provided and the chamber may be warm but in equilibrium.
-        """
         samples = []
 
         def process(eventtime):
@@ -275,6 +313,30 @@ class MpcChamberCalibrateRunner:
 
         self.printer.wait_while(process)
         return samples[-1][1]
+
+    def _wait_for_stability(self):
+        """Wait for temperature to stop changing.
+
+        Used when T_AMBIENT is provided and the chamber may be warm
+        but in equilibrium.
+        """
+        samples = []
+
+        def process(eventtime):
+            temp, _ = self.heater.get_temp(eventtime)
+            samples.append((eventtime, temp))
+            while samples and samples[0][0] < eventtime - 30.0:
+                samples.pop(0)
+            if len(samples) < 30:
+                return True
+            duration = samples[-1][0] - samples[0][0]
+            if duration < 10.0:
+                return True
+            dt = samples[-1][1] - samples[0][1]
+            rate = abs(dt / duration)
+            return rate > 0.05
+
+        self.printer.wait_while(process)
 
     # -- Phase 1: Step response --
 
@@ -296,50 +358,11 @@ class MpcChamberCalibrateRunner:
         tuning.log = []
         return log
 
-    # -- Phase 2: Steady-state holds with PID --
-
-    def _measure_steady_state_with_pid(self, gcmd, target, result,
-                                        heater_power):
-        """Hold at target using existing PID and measure steady-state power.
-
-        The heater's original controller (PID) is already active.
-        We simply set the target and wait for it to settle.
-
-        Returns (h_value, prediction_errors) tuple.
-        """
-        # Set target - PID will drive to it
-        self.heater.set_temp(target)
-
-        # Wait for temperature to settle
-        gcmd.respond_info("    Waiting for steady state...")
-        self._wait_settle(target)
-
-        # Measure average power over window
-        gcmd.respond_info("    Measuring steady-state power...")
-        avg_power_frac = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
-
-        # Convert duty cycle fraction to watts
-        avg_power_watts = avg_power_frac * heater_power
-
-        # Compute h = P_ss / (T_target - T_ambient)
-        delta_T = target - result.t_ambient
-        if delta_T <= 0:
-            raise self.printer.command_error(
-                "Target %.1f <= ambient %.1f, cannot compute h"
-                % (target, result.t_ambient))
-        h = avg_power_watts / delta_T
-
-        # Collect prediction errors for smoothing estimation
-        # Build a temporary model to compute prediction errors
-        errors = self._collect_prediction_errors(
-            target, result, heater_power)
-
-        return h, errors
+    # -- Phase 2: Steady-state measurement utilities --
 
     def _measure_avg_power(self, window_s):
-        """Measure average heater duty cycle fraction over a time window.
+        """Measure average heater duty cycle over a time window.
 
-        Reads the heater's actual PWM output (what the PID is commanding).
         Returns average duty cycle as a fraction 0.0-1.0.
         """
         samples = []
@@ -348,7 +371,6 @@ class MpcChamberCalibrateRunner:
         def process(eventtime):
             if start_time[0] is None:
                 start_time[0] = eventtime
-            # Read the heater's last commanded power
             status = self.heater.get_status(eventtime)
             power = status.get('power', 0.0)
             samples.append(power)
@@ -360,28 +382,15 @@ class MpcChamberCalibrateRunner:
             return 0.0
         return sum(samples) / len(samples)
 
-    def _collect_prediction_errors(self, target, result, heater_power):
-        """Run a temporary MPC model alongside PID to collect prediction errors.
+    def _collect_prediction_errors(self, model, duration_s):
+        """Collect prediction errors from a running MPC model.
 
-        The PID is still controlling the heater. We just run the MPC model
-        in observer mode (no output) to see how well it predicts the
-        measured temperature. The prediction errors are used to estimate
-        the smoothing parameter.
+        The model is already controlling the heater. We record the
+        difference between measurement and model prediction on each tick.
+        Used for smoothing estimation.
+
+        Returns list of prediction error values.
         """
-        # Build a model with current best estimates
-        h_est = result.h_points[-1][1] if result.h_points else 0.15
-        model = ThermalModel(
-            chamber_heat_capacity=result.chamber_heat_capacity,
-            sensor_responsiveness=result.sensor_responsiveness,
-            h_interpolator=HInterpolator([(target, h_est)]),
-            heater_power=heater_power,
-            smoothing=0.5,
-        )
-        current_temp, _ = self.heater.get_temp(
-            self.heater.reactor.monotonic())
-        model.set_initial_state(current_temp)
-        model.set_ambient(result.t_ambient)
-
         errors = []
         start_time = [None]
 
@@ -389,48 +398,23 @@ class MpcChamberCalibrateRunner:
             if start_time[0] is None:
                 start_time[0] = eventtime
             temp, _ = self.heater.get_temp(eventtime)
-            # Run model in observer mode - predict but don't control
-            # Feed it the actual power the PID is applying
-            status = self.heater.get_status(eventtime)
-            actual_power_frac = status.get('power', 0.0)
-            model.last_power = actual_power_frac * heater_power
-            dt = eventtime - model.last_time
-            if model.last_time > 0 and 0 < dt < 1.0:
-                model._propagate(dt, eventtime)
-            model.last_time = eventtime
-            # Record prediction error before correction
             errors.append(temp - model.state_sensor_temp)
-            # Apply correction so model stays in sync
-            model._correct(dt if dt > 0 else 0.1, temp)
-            return eventtime - start_time[0] < 60.0  # 60s collection
+            return eventtime - start_time[0] < duration_s
 
         self.printer.wait_while(process)
         return errors
 
-    # -- Phase 3: Bed transfer with calibrated MPC --
+    # -- Phase 3: Bed transfer --
 
     def _measure_bed_transfer(self, gcmd, bed_temp, chamber_target,
                               result, heater_power):
         """Measure bed heat transfer coefficient using calibrated MPC.
 
-        By this point all chamber parameters (C, sensor_resp, h(T)) are
-        identified, so we can build a proper MPC model to hold the chamber
-        temperature while measuring the bed's thermal contribution.
+        All chamber parameters are identified by this point. MPC holds
+        the chamber while we toggle the bed and measure power difference.
         """
-        # Build fully calibrated MPC model
-        model = ThermalModel(
-            chamber_heat_capacity=result.chamber_heat_capacity,
-            sensor_responsiveness=result.sensor_responsiveness,
-            h_interpolator=HInterpolator(result.h_points),
-            heater_power=heater_power,
-            smoothing=result.smoothing,
-        )
-        current_temp, _ = self.heater.get_temp(
-            self.heater.reactor.monotonic())
-        model.set_initial_state(current_temp)
-        model.set_ambient(result.t_ambient)
+        model = self._build_model(result, result.h_points, heater_power)
 
-        # Use MPC to hold chamber temperature
         hold = _MpcHoldControl(self.heater, model, chamber_target)
         self.heater.set_control(hold)
         self.heater.set_temp(chamber_target)
@@ -456,7 +440,7 @@ class MpcChamberCalibrateRunner:
 
         self.printer.wait_while(wait_bed)
 
-        # Wait for chamber to re-settle with bed heat contribution
+        # Wait for chamber to re-settle
         gcmd.respond_info("    Waiting for chamber to re-settle...")
         self._wait_settle(chamber_target)
 

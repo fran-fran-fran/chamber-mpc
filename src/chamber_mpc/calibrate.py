@@ -253,6 +253,50 @@ class SmoothingEstimator:
         return max(0.2, min(0.9, optimal_gain))
 
 
+def estimate_h_from_arrival(samples, heater_power, chamber_heat_capacity,
+                           t_ambient, window=5):
+    """Estimate rough h from the last portion of a step response.
+
+    At the moment of arrival at target, the energy balance gives:
+        C * dT/dt = P - h * (T - T_amb)
+        h = (P - C * dT/dt) / (T - T_amb)
+
+    Uses the last `window` samples to estimate dT/dt at arrival.
+
+    Args:
+        samples: list of (time, temperature) tuples
+        heater_power: applied power in watts (P = duty * P_heater)
+        chamber_heat_capacity: C in J/K
+        t_ambient: ambient temperature in deg C
+        window: number of trailing samples for slope estimation
+
+    Returns:
+        estimated h in W/K (clamped to positive values)
+    """
+    if len(samples) < window + 1:
+        window = max(2, len(samples) // 2)
+
+    # Estimate dT/dt from trailing samples
+    tail = samples[-window:]
+    dt = tail[-1][0] - tail[0][0]
+    dT = tail[-1][1] - tail[0][1]
+    if dt <= 0:
+        return 0.1  # fallback
+
+    rate = dT / dt  # deg C/s at arrival
+    T_arrival = tail[-1][1]
+    delta_T = T_arrival - t_ambient
+
+    if delta_T <= 1.0:
+        return 0.1  # too close to ambient for meaningful estimate
+
+    h_est = (heater_power - chamber_heat_capacity * rate) / delta_T
+
+    # Clamp: h must be positive, and a rough estimate might be
+    # quite high if the system is still heating fast at arrival
+    return max(0.05, h_est)
+
+
 def compute_cooling_rates(h_points, chamber_heat_capacity, t_ambient,
                           step_c=10.0):
     """Compute passive cooling rates across the calibrated range.
