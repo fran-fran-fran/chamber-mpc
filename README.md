@@ -66,19 +66,34 @@ bed_transfer: 0.35
 |-----------|-------------|---------|-------------|
 | `heater` | required | none | Name of the `[heater_generic]` to control |
 | `heater_power` | required | none | Heater nameplate power in watts |
-| `chamber_heat_capacity` | required | calibrated | Thermal mass in J/K |
-| `sensor_responsiveness` | required | calibrated | Sensor lag coefficient |
-| `smoothing` | optional | 0.5 | Model correction aggressiveness (0.0-1.0) |
-| `target_reach_time` | optional| 2.0 | Prediction horizon in seconds |
-| `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the heater's max_temp minus this margin (to avoid shutdowns due to temperature overshoot) |
-| `h_calibration_points` | required | calibrated | Temperature-dependent h(T) values |
-| `heating_element_sensor` | optional | none | Name of `[temperature_sensor]` on heating element |
-| `heating_element_max_temp` | optional | 300.0 | Heating element temperature hard limit (deg C) |
+| `model_type` | optional | `basic` | Thermal model type: `basic` (2-state) or `advanced` (4-state) |
+| `estimator_type` | optional | `fixed` | State estimator type: `fixed` (constant smoothing) or `kalman` (adaptive gains) |
+| `chamber_heat_capacity` | required | calibrated | Chamber thermal mass in J/K |
+| `sensor_responsiveness` | required | calibrated | S2 sensor lag coefficient (1/s) |
+| `smoothing` | optional | 0.5 | Model correction aggressiveness for basic+fixed mode (0.0-1.0) |
+| `smoothing_heater` | optional | min(0.95, smoothing*1.4) | Override correction aggressiveness for heater/S1 pair in advanced+fixed mode (0.0-1.0). Derived from smoothing if not set |
+| `smoothing_chamber` | optional | smoothing | Override correction aggressiveness for chamber/S2 pair in advanced+fixed mode (0.0-1.0). Derived from smoothing if not set |
+| `target_reach_time` | optional | 2.0 | Prediction horizon in seconds |
+| `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the heater's max_temp minus this margin (deg C) |
+| `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature used by the model (deg C) |
+| `ambient_temp_sensor` | optional | none | Name of external `[temperature_sensor]` for ambient temperature |
+| `h_calibration_points` | required | calibrated | Temperature-dependent h(T) values (multi-line T, h pairs) |
+| `heating_element_sensor` | conditional | none | Name of `[temperature_sensor]` on heating element. Required for advanced model, optional for basic |
+| `heating_element_max_temp` | optional | 250.0 | Heating element temperature hard limit. Must be greater than heater max_temp (deg C) |
 | `heating_element_margin` | optional | 20.0 | Zone below the hard limit where output starts tapering down proportionally (deg C) |
 | `bed_heater` | optional | none | Name of bed heater for disturbance feedforward |
 | `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient in W/K |
-| `ambient_temp` | optional | 25.0 (calibrated) | External ambient temperature (deg C) |
-| `ambient_temp_sensor` | optional | none | External ambient temperature sensor |
+| `heater_heat_capacity` | advanced only | calibrated | Heating element thermal mass in J/K |
+| `heater_chamber_coupling` | advanced only | calibrated | Heater-to-chamber coupling coefficient in W/K |
+| `s1_responsiveness` | advanced only | calibrated | S1 sensor lag coefficient (1/s) |
+| `process_noise_chamber` | kalman only | calibrated | Process noise variance for chamber state |
+| `process_noise_sensor` | kalman only | calibrated | Process noise variance for sensor state (basic+kalman) |
+| `process_noise_heater` | kalman only | calibrated | Process noise variance for heater state (advanced+kalman) |
+| `process_noise_s1` | kalman only | calibrated | Process noise variance for S1 state (advanced+kalman) |
+| `process_noise_s2` | kalman only | calibrated | Process noise variance for S2 state (advanced+kalman) |
+| `measurement_noise` | kalman only | calibrated | Measurement noise variance (basic+kalman) |
+| `measurement_noise_s1` | kalman only | calibrated | S1 measurement noise variance (advanced+kalman) |
+| `measurement_noise_s2` | kalman only | calibrated | S2 measurement noise variance (advanced+kalman) |
 
 ## Calibration
 
