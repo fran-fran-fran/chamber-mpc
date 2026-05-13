@@ -23,7 +23,6 @@ import logging
 
 from .calibrate import (
     StepResponseAnalyzer, SmoothingEstimator, CalibrationResult,
-    estimate_h_from_arrival,
     compute_cooling_rates, format_calibration_report,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
     STEP_RESPONSE_POWER,
@@ -131,6 +130,7 @@ class MpcChamberCalibrateRunner:
         points.sort()
         bed_temp = gcmd.get_float('BED_TEMP', default=None)
         t_ambient_override = gcmd.get_float('T_AMBIENT', default=None)
+        initial_h = gcmd.get_float('INITIAL_H', 1.0)
 
         if not points:
             raise gcmd.error("POINTS must specify at least one temperature")
@@ -147,7 +147,8 @@ class MpcChamberCalibrateRunner:
 
         try:
             result = self._run_calibration(
-                gcmd, tuning, points, bed_temp, t_ambient_override)
+                gcmd, tuning, points, bed_temp, t_ambient_override,
+                initial_h)
             self._save_results(gcmd, result)
         except self.printer.command_error as e:
             raise gcmd.error("Calibration failed: %s" % e)
@@ -157,7 +158,7 @@ class MpcChamberCalibrateRunner:
             self.heater.set_temp(0.0)
 
     def _run_calibration(self, gcmd, tuning, points, bed_temp,
-                         t_ambient_override=None):
+                         t_ambient_override=None, initial_h=1.0):
         """Execute the calibration sequence."""
         result = CalibrationResult()
 
@@ -197,13 +198,11 @@ class MpcChamberCalibrateRunner:
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
         result.sensor_responsiveness = step_result['sensor_responsiveness']
 
-        # Compute rough h from arrival data
-        rough_h = estimate_h_from_arrival(
-            step_data, heater_power,
-            result.chamber_heat_capacity, result.t_ambient)
+        # Initial h for MPC bootstrapping
+        rough_h = initial_h
 
         gcmd.respond_info(
-            "  C = %.1f J/K, sensor_resp = %.4f, rough h = %.3f W/K"
+            "  C = %.1f J/K, sensor_resp = %.4f, initial h = %.3f W/K"
             % (result.chamber_heat_capacity, result.sensor_responsiveness,
                rough_h))
 
