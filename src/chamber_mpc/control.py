@@ -110,7 +110,7 @@ class ControlMPCChamber:
                     'process_noise_chamber', 1.0),
                 process_noise_sensor=profile.get(
                     'process_noise_sensor', 0.1),
-                process_noise_disturbance=50.0,
+                process_noise_disturbance=25.0,
                 measurement_noise=profile.get(
                     'measurement_noise', 0.5),
             )
