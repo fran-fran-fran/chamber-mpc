@@ -163,7 +163,8 @@ class ControlMPCChamber:
                     'measurement_noise_s2', 0.5),
             )
 
-        # Smoothing for advanced+fixed: two values
+        # Smoothing for advanced+fixed: use explicit values if provided,
+        # otherwise derive from base smoothing
         smoothing_heater = profile.get('smoothing_heater')
         smoothing_chamber = profile.get('smoothing_chamber')
         base_smoothing = profile.get('smoothing', 0.5)

@@ -600,13 +600,18 @@ class MpcChamberCalibrateRunner:
             elif eventtime - last_status_time[0] >= 60.0:
                 last_status_time[0] = eventtime
                 status = model.get_status()
+                k = status.get('kalman_gain')
+                k_str = ""
+                if k is not None:
+                    k_str = ", kalman_gain=[%.4f, %.4f]" % (k[0], k[1])
                 gcmd.respond_info(
                     "    [status] chamber=%.1f, sensor=%.1f, "
                     "ambient=%.1f, power=%.1f W, "
-                    "avg=%.1f W (%.0f%%)"
+                    "avg=%.1f W (%.0f%%)%s"
                     % (status['temp_chamber'], status['temp_sensor'],
                        status['temp_ambient'], status['power'],
-                       status['avg_power'], status['avg_duty'] * 100))
+                       status['avg_power'], status['avg_duty'] * 100,
+                       k_str))
 
             # Settle detection
             if abs(temp - target) < SETTLE_TOLERANCE_C:

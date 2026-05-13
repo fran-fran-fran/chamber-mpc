@@ -323,4 +323,5 @@ class ThermalModel:
             'power': round(self.last_power, 2),
             'avg_power': round(self.get_avg_power(), 2),
             'avg_duty': round(self.get_avg_duty(), 4),
+            'kalman_gain': self.kalman.get_gains() if self.estimator_type == 'kalman' and self.kalman is not None else None,
         }
