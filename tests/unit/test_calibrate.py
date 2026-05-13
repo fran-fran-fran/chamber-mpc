@@ -195,3 +195,45 @@ class TestShortStepResponse:
         analyzer = StepResponseAnalyzer(samples, 1800.0, 22.0)
         with pytest.raises(ValueError):
             analyzer.analyze()
+
+
+class TestEstimateHFromCooling:
+    def test_known_cooling_rate(self):
+        """Generate cooling data with known h and verify recovery."""
+        from chamber_mpc.calibrate import estimate_h_from_cooling
+        C = 500.0
+        h_true = 4.0
+        T_amb = 25.0
+        # Simulate cooling from 90 to 70 deg C
+        samples = []
+        T = 90.0
+        t = 0.0
+        dt = 0.3
+        while T > 70.0:
+            samples.append((t, T))
+            dT = -h_true * (T - T_amb) / C * dt
+            T += dT
+            t += dt
+        h_est = estimate_h_from_cooling(samples, C, T_amb, center_temp=80.0)
+        assert h_est is not None
+        assert h_est == pytest.approx(h_true, rel=0.05)
+
+    def test_returns_none_on_insufficient_data(self):
+        from chamber_mpc.calibrate import estimate_h_from_cooling
+        samples = [(0, 80.0), (1, 79.5)]
+        result = estimate_h_from_cooling(samples, 500.0, 25.0, 80.0)
+        assert result is None
+
+    def test_returns_none_if_rising(self):
+        from chamber_mpc.calibrate import estimate_h_from_cooling
+        # Temperature rising, not cooling
+        samples = [(i * 0.3, 75.0 + i * 0.5) for i in range(30)]
+        result = estimate_h_from_cooling(samples, 500.0, 25.0, 80.0)
+        assert result is None
+
+    def test_returns_none_near_ambient(self):
+        from chamber_mpc.calibrate import estimate_h_from_cooling
+        # Cooling near ambient
+        samples = [(i * 0.3, 26.0 - i * 0.01) for i in range(30)]
+        result = estimate_h_from_cooling(samples, 500.0, 25.0, 26.0)
+        assert result is None

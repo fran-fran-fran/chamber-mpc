@@ -49,6 +49,7 @@ class ThermalModel:
         self.state_chamber_temp = AMBIENT_TEMP_DEFAULT
         self.state_sensor_temp = AMBIENT_TEMP_DEFAULT
         self.state_ambient_temp = AMBIENT_TEMP_DEFAULT
+        self.state_disturbance = 0.0  # offset-free MPC disturbance (watts)
         self.last_power = 0.0
         self.last_time = 0.0
 
@@ -175,10 +176,10 @@ class ThermalModel:
             except Exception:
                 pass  # pragma: no cover -- sensor read failure, skip feedforward
 
-        # Chamber temperature update
+        # Chamber temperature update (includes disturbance for offset-free control)
         dT_chamber = (
-            (p_heating + p_bed - p_loss_ambient) * dt
-            / self.chamber_heat_capacity
+            (p_heating + self.state_disturbance + p_bed - p_loss_ambient)
+            * dt / self.chamber_heat_capacity
         )
         self.state_chamber_temp += dT_chamber
 
@@ -191,7 +192,11 @@ class ThermalModel:
 
         # Kalman predict step
         if self.estimator_type == 'kalman' and self.kalman is not None:
-            self.kalman.predict(dt, self.sensor_responsiveness)
+            if hasattr(self.kalman, 'q_disturbance'):
+                self.kalman.predict(dt, self.sensor_responsiveness,
+                                    self.chamber_heat_capacity)
+            else:
+                self.kalman.predict(dt, self.sensor_responsiveness)
 
     def _correct(self, dt, temp_measured):
         """Correct model state from measurement.
@@ -202,9 +207,11 @@ class ThermalModel:
         innovation = temp_measured - self.state_sensor_temp
 
         if self.estimator_type == 'kalman' and self.kalman is not None:
-            corr_chamber, corr_sensor = self.kalman.update(innovation)
-            self.state_chamber_temp += corr_chamber
-            self.state_sensor_temp += corr_sensor
+            corrections = self.kalman.update(innovation)
+            self.state_chamber_temp += corrections[0]
+            self.state_sensor_temp += corrections[1]
+            if len(corrections) > 2:
+                self.state_disturbance += corrections[2]
         else:
             effective_smoothing = 1.0 - (1.0 - self.smoothing) ** dt
             adjustment = innovation * effective_smoothing
@@ -264,6 +271,11 @@ class ThermalModel:
                 pass  # sensor read failure
 
         # Total power needed
+        # Note: disturbance is in propagation only (not output).
+        # The Kalman filter estimates d from persistent prediction
+        # errors, and d corrects the model's internal state prediction.
+        # The output computation sees the corrected state_chamber_temp
+        # and naturally adjusts power accordingly.
         power = max(0.0, min(
             max_power * self.heater_power,
             heating_power + loss_ambient + loss_bed
@@ -323,5 +335,6 @@ class ThermalModel:
             'power': round(self.last_power, 2),
             'avg_power': round(self.get_avg_power(), 2),
             'avg_duty': round(self.get_avg_duty(), 4),
+            'disturbance': round(self.state_disturbance, 2),
             'kalman_gain': self.kalman.get_gains() if self.estimator_type == 'kalman' and self.kalman is not None else None,
         }

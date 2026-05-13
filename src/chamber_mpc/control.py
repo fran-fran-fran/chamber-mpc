@@ -11,7 +11,7 @@ import logging
 
 from .thermal_model import ThermalModel
 from .thermal_model_advanced import ThermalModelAdvanced
-from .kalman import KalmanFilter2, KalmanFilter4
+from .kalman import KalmanFilter2, KalmanFilter3, KalmanFilter4
 from .h_interpolator import HInterpolator
 
 
@@ -105,11 +105,12 @@ class ControlMPCChamber:
         kalman = None
 
         if estimator_type == 'kalman':
-            kalman = KalmanFilter2(
+            kalman = KalmanFilter3(
                 process_noise_chamber=profile.get(
                     'process_noise_chamber', 1.0),
                 process_noise_sensor=profile.get(
-                    'process_noise_sensor', 1.0),
+                    'process_noise_sensor', 0.1),
+                process_noise_disturbance=50.0,
                 measurement_noise=profile.get(
                     'measurement_noise', 0.5),
             )

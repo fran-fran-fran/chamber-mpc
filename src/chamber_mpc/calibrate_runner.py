@@ -29,7 +29,7 @@ from .calibrate import (
     STEP_RESPONSE_POWER,
 )
 from .h_interpolator import HInterpolator
-from .kalman import KalmanFilter2
+from .kalman import KalmanFilter3
 from .thermal_model import ThermalModel
 
 
@@ -303,18 +303,20 @@ class MpcChamberCalibrateRunner:
     def _build_model(self, result, h_points, heater_power):
         """Build a ThermalModel with Kalman filter for calibration.
 
-        Uses Kalman estimation with conservative defaults during
-        calibration. This provides per-state correction gains that
-        prevent the steady-state offset problem that occurs with
-        fixed smoothing and a rough h estimate.
+        Uses Kalman estimation with disturbance state for offset-free
+        control during calibration. The disturbance state accumulates
+        persistent prediction errors caused by wrong h, providing
+        correct steady-state power regardless of h accuracy.
 
         Large Q_chamber: model is uncertain (h may be wrong)
         Small Q_sensor: sensor lag dynamics are well-modeled
+        Moderate Q_disturbance: disturbance adapts over ~30s
         Moderate R: typical PT1000 noise level
         """
-        kalman = KalmanFilter2(
+        kalman = KalmanFilter3(
             process_noise_chamber=1.0,
             process_noise_sensor=0.1,
+            process_noise_disturbance=500.0,
             measurement_noise=0.5,
         )
         model = ThermalModel(
@@ -603,15 +605,19 @@ class MpcChamberCalibrateRunner:
                 k = status.get('kalman_gain')
                 k_str = ""
                 if k is not None:
-                    k_str = ", kalman_gain=[%.4f, %.4f]" % (k[0], k[1])
+                    k_str = ", kalman_gain=[%s]" % ", ".join("%.4f" % v for v in k)
+                d = status.get('disturbance', 0.0)
+                d_str = ""
+                if d != 0.0:
+                    d_str = ", d=%.1f W" % d
                 gcmd.respond_info(
                     "    [status] chamber=%.1f, sensor=%.1f, "
                     "ambient=%.1f, power=%.1f W, "
-                    "avg=%.1f W (%.0f%%)%s"
+                    "avg=%.1f W (%.0f%%)%s%s"
                     % (status['temp_chamber'], status['temp_sensor'],
                        status['temp_ambient'], status['power'],
                        status['avg_power'], status['avg_duty'] * 100,
-                       k_str))
+                       d_str, k_str))
 
             # Settle detection
             if abs(temp - target) < SETTLE_TOLERANCE_C:

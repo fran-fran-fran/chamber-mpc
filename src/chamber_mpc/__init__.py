@@ -113,11 +113,11 @@ class ChamberMpcModule:
 
         # Kalman estimator parameters
         profile['process_noise_chamber'] = config.getfloat(
-            'process_noise_chamber', default=None)
+            'process_noise_chamber', 1.0)
         profile['process_noise_sensor'] = config.getfloat(
-            'process_noise_sensor', default=None)
+            'process_noise_sensor', 0.1)
         profile['measurement_noise'] = config.getfloat(
-            'measurement_noise', default=None)
+            'measurement_noise', 0.5)
         # Advanced Kalman parameters
         profile['process_noise_heater'] = config.getfloat(
             'process_noise_heater', default=None)
@@ -199,20 +199,9 @@ class ChamberMpcModule:
 
         # Kalman estimator requires noise parameters
         if estimator == 'kalman':
-            if model == 'basic':
-                if p['process_noise_chamber'] is None:
-                    issues.append(
-                        "estimator_type=kalman requires "
-                        "process_noise_chamber (not calibrated)")
-                if p['process_noise_sensor'] is None:
-                    issues.append(
-                        "estimator_type=kalman requires "
-                        "process_noise_sensor (not calibrated)")
-                if p['measurement_noise'] is None:
-                    issues.append(
-                        "estimator_type=kalman requires "
-                        "measurement_noise (not calibrated)")
-            elif model == 'advanced':
+            # basic+kalman: noise params have sensible defaults,
+            # no validation needed
+            if model == 'advanced':
                 for param in ('process_noise_heater',
                               'process_noise_chamber',
                               'process_noise_s1', 'process_noise_s2',
