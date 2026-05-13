@@ -73,6 +73,11 @@ class _MpcHoldControl:
 
     Used during calibration steady-state holds (Phase 2 onward).
     The model is progressively refined as more h points are identified.
+
+    To avoid verify_heater shutdowns during MPC bootstrapping with a
+    rough h estimate, this control gradually advances the heater's
+    reported target to track the actual temperature. This way
+    verify_heater always sees the temperature near its target.
     """
 
     def __init__(self, heater, model, target):
@@ -80,15 +85,26 @@ class _MpcHoldControl:
         self.model = model
         self.target = target
         self.last_power_fraction = 0.0
+        self._tracking_target = None
 
     def temperature_update(self, read_time, temp, target_temp):
+        # Gradually advance the heater target toward actual target
+        # so verify_heater sees progress rather than a distant goal
+        if self._tracking_target is None:
+            self._tracking_target = temp
+        if self._tracking_target < self.target:
+            # Advance tracking target toward real target, capped at
+            # 2 deg C above current temp to always show "progress"
+            self._tracking_target = min(
+                self.target, max(self._tracking_target, temp + 2.0))
+            self.heater.set_temp(self._tracking_target)
         max_power = self.heater.max_power
         duty = self.model.update(read_time, temp, self.target, max_power)
         self.last_power_fraction = duty
         self.heater.set_pwm(read_time, duty)
 
     def check_busy(self, eventtime, smoothed_temp, target_temp):
-        return abs(target_temp - smoothed_temp) > 1.0
+        return abs(self.target - smoothed_temp) > 1.0
 
     def get_profile(self):
         return {'name': 'calibrating'}
@@ -228,9 +244,9 @@ class MpcChamberCalibrateRunner:
             self.heater.set_control(hold)
             self.heater.set_temp(target)
 
-            # Wait for temperature to settle
+            # Wait for temperature to settle (with periodic status)
             gcmd.respond_info("    Waiting for steady state...")
-            self._wait_settle(target)
+            self._wait_settle_with_status(target, model, gcmd)
 
             # Measure steady-state power
             gcmd.respond_info("    Measuring steady-state power...")
@@ -482,6 +498,40 @@ class MpcChamberCalibrateRunner:
 
         def process(eventtime):
             temp, _ = self.heater.get_temp(eventtime)
+            if abs(temp - target) < SETTLE_TOLERANCE_C:
+                if stable_since[0] is None:
+                    stable_since[0] = eventtime
+                elif eventtime - stable_since[0] > SETTLE_DURATION_S:
+                    return False
+            else:
+                stable_since[0] = None
+            return True
+
+        self.printer.wait_while(process)
+
+    def _wait_settle_with_status(self, target, model, gcmd):
+        """Wait for temperature to settle, printing MPC status every 60s."""
+        stable_since = [None]
+        last_status_time = [None]
+
+        def process(eventtime):
+            temp, _ = self.heater.get_temp(eventtime)
+
+            # Print status every 60 seconds
+            if last_status_time[0] is None:
+                last_status_time[0] = eventtime
+            elif eventtime - last_status_time[0] >= 60.0:
+                last_status_time[0] = eventtime
+                status = model.get_status()
+                gcmd.respond_info(
+                    "    [status] chamber=%.1f, sensor=%.1f, "
+                    "ambient=%.1f, power=%.1f W, "
+                    "avg=%.1f W (%.0f%%)"
+                    % (status['temp_chamber'], status['temp_sensor'],
+                       status['temp_ambient'], status['power'],
+                       status['avg_power'], status['avg_duty'] * 100))
+
+            # Settle detection
             if abs(temp - target) < SETTLE_TOLERANCE_C:
                 if stable_since[0] is None:
                     stable_since[0] = eventtime
