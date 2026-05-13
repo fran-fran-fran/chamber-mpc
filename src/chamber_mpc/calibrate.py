@@ -297,6 +297,69 @@ def estimate_h_from_arrival(samples, heater_power, chamber_heat_capacity,
     return max(0.05, h_est)
 
 
+def estimate_h_from_cooling(samples, chamber_heat_capacity, t_ambient,
+                            center_temp, window=10.0):
+    """Estimate h from passive cooling slope around a target temperature.
+
+    After a step response with heater off, the system cools passively.
+    The energy balance with P=0 gives:
+        C * dT/dt = -h * (T - T_amb)
+        h = -C * (dT/dt) / (T - T_amb)
+
+    Measures the cooling slope over a temperature window centered on
+    center_temp (e.g. 85 to 75 deg C for center_temp=80, window=10).
+
+    Args:
+        samples: list of (time, temperature) tuples during cooling
+        chamber_heat_capacity: C in J/K
+        t_ambient: ambient temperature in deg C
+        center_temp: temperature to estimate h at (deg C)
+        window: temperature window width (deg C), centered on center_temp
+
+    Returns:
+        estimated h in W/K
+    """
+    t_high = center_temp + window / 2.0
+    t_low = center_temp - window / 2.0
+
+    # Find samples within the window
+    window_samples = [(t, temp) for t, temp in samples
+                      if t_low <= temp <= t_high]
+
+    if len(window_samples) < 5:
+        return None  # not enough data in window
+
+    # Linear regression for slope (dT/dt)
+    n = len(window_samples)
+    sum_t = sum(s[0] for s in window_samples)
+    sum_T = sum(s[1] for s in window_samples)
+    sum_tT = sum(s[0] * s[1] for s in window_samples)
+    sum_tt = sum(s[0] * s[0] for s in window_samples)
+
+    denom = n * sum_tt - sum_t * sum_t
+    if abs(denom) < 1e-10:
+        return None  # degenerate data
+
+    slope = (n * sum_tT - sum_t * sum_T) / denom  # dT/dt in deg C/s
+
+    if slope >= 0:
+        return None  # temperature is rising, not cooling
+
+    # Average temperature in the window
+    avg_temp = sum_T / n
+    delta_T = avg_temp - t_ambient
+
+    if delta_T <= 1.0:
+        return None  # too close to ambient
+
+    h = -chamber_heat_capacity * slope / delta_T
+
+    if h <= 0:
+        return None
+
+    return h
+
+
 def compute_cooling_rates(h_points, chamber_heat_capacity, t_ambient,
                           step_c=10.0):
     """Compute passive cooling rates across the calibrated range.

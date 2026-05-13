@@ -23,6 +23,7 @@ import logging
 
 from .calibrate import (
     StepResponseAnalyzer, SmoothingEstimator, CalibrationResult,
+    estimate_h_from_cooling,
     compute_cooling_rates, format_calibration_report,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
     STEP_RESPONSE_POWER,
@@ -146,7 +147,7 @@ class MpcChamberCalibrateRunner:
         points.sort()
         bed_temp = gcmd.get_float('BED_TEMP', default=None)
         t_ambient_override = gcmd.get_float('T_AMBIENT', default=None)
-        initial_h = gcmd.get_float('INITIAL_H', 1.0)
+        initial_h = gcmd.get_float('INITIAL_H', default=None)
 
         if not points:
             raise gcmd.error("POINTS must specify at least one temperature")
@@ -214,13 +215,32 @@ class MpcChamberCalibrateRunner:
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
         result.sensor_responsiveness = step_result['sensor_responsiveness']
 
-        # Initial h for MPC bootstrapping
-        rough_h = initial_h
-
         gcmd.respond_info(
-            "  C = %.1f J/K, sensor_resp = %.4f, initial h = %.3f W/K"
-            % (result.chamber_heat_capacity, result.sensor_responsiveness,
-               rough_h))
+            "  C = %.1f J/K, sensor_resp = %.4f"
+            % (result.chamber_heat_capacity,
+               result.sensor_responsiveness))
+
+        # Phase 1b: estimate rough h from passive cooling
+        if initial_h is not None:
+            rough_h = initial_h
+            gcmd.respond_info(
+                "  Using provided INITIAL_H = %.3f W/K" % rough_h)
+        else:
+            gcmd.respond_info(
+                "Phase 1b: Passive cooling to estimate rough h...")
+            cooling_data = self._record_cooling(
+                tuning, points[0], gcmd)
+            rough_h = estimate_h_from_cooling(
+                cooling_data, result.chamber_heat_capacity,
+                result.t_ambient, center_temp=points[0])
+            if rough_h is None or rough_h <= 0:
+                rough_h = 1.0
+                gcmd.respond_info(
+                    "  Could not estimate h from cooling, "
+                    "using default h = 1.0 W/K")
+            else:
+                gcmd.respond_info(
+                    "  Rough h from cooling = %.3f W/K" % rough_h)
 
         # Phase 2: progressive steady-state holds using self-bootstrapping MPC
         gcmd.respond_info(
@@ -372,6 +392,57 @@ class MpcChamberCalibrateRunner:
         log = list(tuning.log)
         tuning.log = []
         return log
+
+    def _record_cooling(self, tuning, target, gcmd):
+        """Record passive cooling data after step response overshoot.
+
+        After the step response, the heater is off and the system
+        overshoots then cools. We wait for the temperature to peak
+        and then record samples as it cools through a window around
+        the target temperature.
+
+        Args:
+            tuning: TuningControl (heater off)
+            target: first calibration target temperature
+            gcmd: GCode command for status messages
+
+        Returns:
+            list of (time, temperature) tuples during cooling
+        """
+        tuning.set_output(0.0, 0.0)
+        cooling_samples = []
+        t_high = target + 5.0  # start recording 5 deg C above target
+        t_low = target - 5.0   # stop recording 5 deg C below target
+        peak_seen = [False]
+        last_temp = [None]
+
+        def process(eventtime):
+            temp, _ = self.heater.get_temp(eventtime)
+
+            # Detect peak (temperature starts falling)
+            if last_temp[0] is not None:
+                if temp < last_temp[0] - 0.2:
+                    peak_seen[0] = True
+            last_temp[0] = temp
+
+            if not peak_seen[0]:
+                return True  # still waiting for peak
+
+            # Record samples in the cooling window
+            if temp <= t_high and temp >= t_low:
+                cooling_samples.append((eventtime, temp))
+
+            # Stop when we've cooled below the window
+            if temp < t_low:
+                return False
+
+            return True
+
+        self.printer.wait_while(process)
+
+        gcmd.respond_info(
+            "  Collected %d cooling samples" % len(cooling_samples))
+        return cooling_samples
 
     # -- Phase 2: Steady-state measurement utilities --
 
