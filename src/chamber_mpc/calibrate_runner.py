@@ -29,6 +29,7 @@ from .calibrate import (
     STEP_RESPONSE_POWER,
 )
 from .h_interpolator import HInterpolator
+from .kalman import KalmanFilter2
 from .thermal_model import ThermalModel
 
 
@@ -312,13 +313,30 @@ class MpcChamberCalibrateRunner:
     # -- Model building --
 
     def _build_model(self, result, h_points, heater_power):
-        """Build a ThermalModel from current best parameters."""
+        """Build a ThermalModel with Kalman filter for calibration.
+
+        Uses Kalman estimation with conservative defaults during
+        calibration. This provides per-state correction gains that
+        prevent the steady-state offset problem that occurs with
+        fixed smoothing and a rough h estimate.
+
+        Large Q_chamber: model is uncertain (h may be wrong)
+        Small Q_sensor: sensor lag dynamics are well-modeled
+        Moderate R: typical PT1000 noise level
+        """
+        kalman = KalmanFilter2(
+            process_noise_chamber=1.0,
+            process_noise_sensor=0.1,
+            measurement_noise=0.5,
+        )
         model = ThermalModel(
             chamber_heat_capacity=result.chamber_heat_capacity,
             sensor_responsiveness=result.sensor_responsiveness,
             h_interpolator=HInterpolator(h_points),
             heater_power=heater_power,
             smoothing=0.5,
+            estimator_type='kalman',
+            kalman_filter=kalman,
         )
         current_temp, _ = self.heater.get_temp(
             self.heater.reactor.monotonic())
