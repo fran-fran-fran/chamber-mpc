@@ -340,14 +340,23 @@ class ControlMPCChamber:
                    status['temp_ambient'], status['power'],
                    status['avg_power'], status['avg_duty'] * 100))
         else:
+            k = status.get('kalman_gain')
+            k_str = ""
+            if k is not None:
+                k_str = ", kalman_gain=[%s]" % ", ".join("%.4f" % v for v in k)
+            d = status.get('disturbance', 0.0)
+            d_str = ""
+            if d != 0.0:
+                d_str = ", d=%.1f W" % d
             gcmd.respond_info(
                 "MPC chamber [basic]: "
                 "chamber=%.1f deg C, sensor=%.1f deg C, "
                 "ambient=%.1f deg C, power=%.1f W, "
-                "avg_power=%.1f W (%.0f%%)"
+                "avg_power=%.1f W (%.0f%%)%s%s"
                 % (status['temp_chamber'], status['temp_sensor'],
                    status['temp_ambient'], status['power'],
-                   status['avg_power'], status['avg_duty'] * 100))
+                   status['avg_power'], status['avg_duty'] * 100,
+                   d_str, k_str))
 
     # -- Status for Moonraker --
 
