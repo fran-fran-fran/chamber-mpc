@@ -76,10 +76,9 @@ class _MpcHoldControl:
     Used during calibration steady-state holds (Phase 2 onward).
     The model is progressively refined as more h points are identified.
 
-    To avoid verify_heater shutdowns during MPC bootstrapping with a
-    rough h estimate, this control gradually advances the heater's
-    reported target to track the actual temperature. This way
-    verify_heater always sees the temperature near its target.
+    Only calls set_pwm from temperature_update (never set_temp),
+    matching Kalico's control pattern and avoiding deadlock with
+    the heater's threading lock.
     """
 
     def __init__(self, heater, model, target):
@@ -87,19 +86,8 @@ class _MpcHoldControl:
         self.model = model
         self.target = target
         self.last_power_fraction = 0.0
-        self._tracking_target = None
 
     def temperature_update(self, read_time, temp, target_temp):
-        # Gradually advance the heater target toward actual target
-        # so verify_heater sees progress rather than a distant goal
-        if self._tracking_target is None:
-            self._tracking_target = temp
-        if self._tracking_target < self.target:
-            # Advance tracking target toward real target, capped at
-            # 2 deg C above current temp to always show "progress"
-            self._tracking_target = min(
-                self.target, max(self._tracking_target, temp + 2.0))
-            self.heater.set_temp(self._tracking_target)
         max_power = self.heater.max_power
         duty = self.model.update(read_time, temp, self.target, max_power)
         self.last_power_fraction = duty
