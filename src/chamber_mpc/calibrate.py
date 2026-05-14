@@ -109,11 +109,11 @@ class StepResponseAnalyzer:
                 chamber_heat_capacity)
             chamber_heat_capacity = abs(chamber_heat_capacity)
 
-        if s1_responsiveness <= 0 or s1_responsiveness > 10.0:  # pragma: no cover
+        if s1_responsiveness <= 0 or s1_responsiveness > 1.0:  # pragma: no cover
             self.log.warning(
                 "s1_responsiveness out of range (%.4f), clamping",
                 s1_responsiveness)
-            s1_responsiveness = max(0.01, min(10.0,
+            s1_responsiveness = max(0.01, min(1.0,
                                                    abs(s1_responsiveness)))
 
         # Try asymptotic method for refined s1_responsiveness
@@ -123,7 +123,7 @@ class StepResponseAnalyzer:
                 self.log.info(
                     "Asymptotic refinement: asymp_T=%.1f",
                     asymp['asymp_temp'])
-                if 0.001 < asymp['s1_responsiveness'] < 10.0:
+                if 0.001 < asymp['s1_responsiveness'] < 1.0:
                     s1_responsiveness = asymp['s1_responsiveness']
         except Exception as e:
             self.log.info(
