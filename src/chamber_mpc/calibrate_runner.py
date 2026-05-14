@@ -306,7 +306,7 @@ class MpcChamberCalibrateRunner:
             process_noise_chamber=1.0,
             process_noise_s1=0.1,
             process_noise_disturbance=500.0,
-            measurement_noise=0.5,
+            measurement_noise_s1=0.5,
         )
         model = ThermalModel(
             chamber_heat_capacity=result.chamber_heat_capacity,
