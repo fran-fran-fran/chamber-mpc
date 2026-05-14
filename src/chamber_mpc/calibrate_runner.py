@@ -181,7 +181,7 @@ class MpcChamberCalibrateRunner:
         if t_ambient_override is not None:
             result.t_ambient = t_ambient_override
             gcmd.respond_info(
-                "Phase 0: Using provided T_ambient = %.1f deg C"
+                "Phase 0: Using provided T_ambient = %.1f\u00b0C"
                 % result.t_ambient)
             gcmd.respond_info(
                 "  Waiting for temperature to stabilize...")
@@ -190,11 +190,11 @@ class MpcChamberCalibrateRunner:
             gcmd.respond_info("Phase 0: Measuring ambient temperature...")
             result.t_ambient = self._measure_ambient()
             gcmd.respond_info(
-                "  T_ambient = %.1f deg C" % result.t_ambient)
+                "  T_ambient = %.1f\u00b0C" % result.t_ambient)
 
         # Phase 1: step response from ambient to first point
         gcmd.respond_info(
-            "Phase 1: Step response to %.0f deg C..." % points[0])
+            "Phase 1: Step response to %.0f\u00b0C..." % points[0])
         step_data = self._run_step_response(tuning, points[0])
         analyzer = StepResponseAnalyzer(
             step_data, heater_power, result.t_ambient)
@@ -235,7 +235,7 @@ class MpcChamberCalibrateRunner:
 
         for i, target in enumerate(points):
             gcmd.respond_info(
-                "  Point %d/%d: %.0f deg C" % (i + 1, len(points), target))
+                "  Point %d/%d: %.0f\u00b0C" % (i + 1, len(points), target))
 
             # Build MPC model with best available parameters
             h_points_so_far = list(result.h_points)
@@ -277,7 +277,7 @@ class MpcChamberCalibrateRunner:
         # Phase 3: optional bed transfer using fully calibrated MPC
         if bed_temp is not None:
             gcmd.respond_info(
-                "Phase 3: Bed transfer measurement at bed=%.0f deg C..."
+                "Phase 3: Bed transfer measurement at bed=%.0f\u00b0C..."
                 % bed_temp)
             result.bed_transfer = self._measure_bed_transfer(
                 gcmd, bed_temp, points[-1], result, heater_power)
@@ -486,7 +486,7 @@ class MpcChamberCalibrateRunner:
 
         # Turn bed on
         gcmd.respond_info(
-            "    Turning bed on to %.0f deg C..." % bed_temp)
+            "    Turning bed on to %.0f\u00b0C..." % bed_temp)
         bed_heater = self._get_bed_heater()
         bed_heater.set_temp(bed_temp)
 
@@ -576,8 +576,8 @@ class MpcChamberCalibrateRunner:
                 if d != 0.0:
                     d_str = ", d=%.1f W" % d
                 gcmd.respond_info(
-                    "    [status] chamber=%.1f, sensor=%.1f, "
-                    "ambient=%.1f, power=%.1f W, "
+                    "    [status] chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
+                    "ambient=%.1f\u00b0C, power=%.1f W, "
                     "avg=%.1f W (%.0f%%)%s%s"
                     % (status['temp_chamber'], status['temp_s1'],
                        status['temp_ambient'], status['power'],

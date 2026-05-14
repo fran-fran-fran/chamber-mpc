@@ -6,7 +6,7 @@
 # File: thermal_model_advanced.py
 # Description: Four-state advanced thermal model for MPC.
 #              States: T_heater, T_chamber, T_s1 (heater sensor), T_s2 (chamber sensor)
-#              Two measurements: S1 (near secondary sensor), S2 (chamber air)
+#              Two measurements: S1 (chamber air, primary), S2 (near heating element, secondary)
 #              The secondary sensor is modeled as a separate thermal mass
 #              coupled to the chamber, enabling model-integrated element
 #              temperature limiting (no external clamp needed).
@@ -20,7 +20,7 @@ class ThermalModelAdvanced:
     """Four-state thermal model for chamber MPC.
 
     States:
-        state_heater_temp:  estimated secondary sensor temperature (deg C)
+        state_heater_temp:  estimated heating element temperature (deg C)
         state_chamber_temp: estimated chamber bulk temperature (deg C)
         state_s1_temp:      estimated S1 sensor reading (deg C, lagged from chamber)
         state_s2_temp:      estimated S2 sensor reading (deg C, lagged from heater)
@@ -29,8 +29,8 @@ class ThermalModelAdvanced:
     Dynamics:
         C_h * dT_h/dt = P - k_hc * (T_h - T_c)
         C_c * dT_c/dt = k_hc * (T_h - T_c) - h_c(T_c) * (T_c - T_amb)
-        dT_s1/dt = r_s1 * (T_h - T_s1)
-        dT_s2/dt = r_s2 * (T_c - T_s2)
+        dT_s1/dt = r_s1 * (T_c - T_s1)
+        dT_s2/dt = r_s2 * (T_h - T_s2)
 
     Measurements: y1 = T_s1, y2 = T_s2
     """
@@ -216,14 +216,14 @@ class ThermalModelAdvanced:
                 + p_bed - p_loss) * dt / c_c
         self.state_chamber_temp += dT_c
 
-        # S1 sensor state: dT_s1/dt = r_s1 * (T_h - T_s1)
+        # S1 sensor state (primary, observes chamber): dT_s1/dt = r_s1 * (T_c - T_s1)
         dT_s1 = self.s1_responsiveness * (
-            self.state_heater_temp - self.state_s1_temp) * dt
+            self.state_chamber_temp - self.state_s1_temp) * dt
         self.state_s1_temp += dT_s1
 
-        # S2 sensor state: dT_s2/dt = r_s2 * (T_c - T_s2)
+        # S2 sensor state (secondary, observes heater): dT_s2/dt = r_s2 * (T_h - T_s2)
         dT_s2 = self.s2_responsiveness * (
-            self.state_chamber_temp - self.state_s2_temp) * dt
+            self.state_heater_temp - self.state_s2_temp) * dt
         self.state_s2_temp += dT_s2
 
         # Kalman predict step

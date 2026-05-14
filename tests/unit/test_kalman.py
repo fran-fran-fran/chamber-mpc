@@ -103,7 +103,7 @@ class TestKalmanFilter4:
         assert len(corr) == 4
 
     def test_s1_innovation_primarily_corrects_heater(self):
-        """S1 measures near the heater, so S1 innovation should
+        """S2 measures near the heater, so S2 innovation should
         primarily correct T_heater and T_s1."""
         kf = KalmanFilter4(1.0, 1.0, 0.5, 0.5, 0.3, 0.3)
         for _ in range(20):
@@ -116,7 +116,7 @@ class TestKalmanFilter4:
         assert abs(gains['k_s1_from_s1']) > 0
 
     def test_s2_innovation_primarily_corrects_chamber(self):
-        """S2 measures chamber air, so S2 innovation should
+        """S1 measures chamber air, so S1 innovation should
         primarily correct T_chamber and T_s2."""
         kf = KalmanFilter4(1.0, 1.0, 0.5, 0.5, 0.3, 0.3)
         for _ in range(20):

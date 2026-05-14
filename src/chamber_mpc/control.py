@@ -258,7 +258,7 @@ class ControlMPCChamber:
         if target_temp > cap:
             if not self._cap_warned:
                 self.log.warning(
-                    "mpc_chamber: target %.1f deg C clamped to %.1f deg C "
+                    "mpc_chamber: target %.1f \u00b0C clamped to %.1f \u00b0C "
                     "(max_temp %.1f - margin %.1f)",
                     target_temp, cap, self.max_temp, self.max_temp_margin)
                 self._cap_warned = True
@@ -307,9 +307,9 @@ class ControlMPCChamber:
         if is_advanced:
             gcmd.respond_info(
                 "MPC chamber [advanced]: "
-                "heater=%.1f deg C, chamber=%.1f deg C, "
-                "s1=%.1f deg C, s2=%.1f deg C, "
-                "ambient=%.1f deg C, power=%.1f W, "
+                "heater=%.1f\u00b0C, chamber=%.1f\u00b0C, "
+                "s1=%.1f\u00b0C, s2=%.1f\u00b0C, "
+                "ambient=%.1f\u00b0C, power=%.1f W, "
                 "avg_power=%.1f W (%.0f%%)"
                 % (status['temp_heater'], status['temp_chamber'],
                    status['temp_s1'], status['temp_s2'],
@@ -326,8 +326,8 @@ class ControlMPCChamber:
                 d_str = ", d=%.1f W" % d
             gcmd.respond_info(
                 "MPC chamber [basic]: "
-                "chamber=%.1f deg C, sensor=%.1f deg C, "
-                "ambient=%.1f deg C, power=%.1f W, "
+                "chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
+                "ambient=%.1f\u00b0C, power=%.1f W, "
                 "avg_power=%.1f W (%.0f%%)%s%s"
                 % (status['temp_chamber'], status['temp_s1'],
                    status['temp_ambient'], status['power'],

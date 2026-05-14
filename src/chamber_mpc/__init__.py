@@ -84,8 +84,8 @@ class ChamberMpcModule:
             'heater_heat_capacity', default=None)
         profile['heating_element_transfer'] = config.getfloat(
             'heating_element_transfer', default=None)
-        profile['s1_responsiveness'] = config.getfloat(
-            's1_responsiveness', default=None)
+        profile['s2_responsiveness'] = config.getfloat(
+            's2_responsiveness', default=None)
         
 
         # h(T) calibration points
@@ -109,12 +109,8 @@ class ChamberMpcModule:
         # Advanced Kalman parameters
         profile['process_noise_heater'] = config.getfloat(
             'process_noise_heater', default=None)
-        profile['process_noise_s1'] = config.getfloat(
-            'process_noise_s1', default=None)
         profile['process_noise_s2'] = config.getfloat(
             'process_noise_s2', default=None)
-        profile['measurement_noise_s1'] = config.getfloat(
-            'measurement_noise_s1', default=None)
         profile['measurement_noise_s2'] = config.getfloat(
             'measurement_noise_s2', default=None)
 
@@ -182,7 +178,7 @@ class ChamberMpcModule:
             if p['secondary_sensor'] is None:
                 issues.append(
                     "model_type=advanced requires secondary_sensor "
-                    "(S1 sensor for heater state observation)")
+                    "(secondary sensor for heater state observation)")
 
         # Advanced Kalman requires additional noise parameters
         if model == 'advanced':

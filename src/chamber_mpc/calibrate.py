@@ -384,7 +384,7 @@ def format_calibration_report(result, cooling_rates):
                 break
         rate_str = "%.2f deg C/min" % rate if rate is not None else "N/A"
         lines.append(
-            "    T=%5.1f deg C  h=%.4f W/K  -> passive cool rate: %s"
+            "    T=%5.1f\u00b0C  h=%.4f W/K  -> passive cool rate: %s"
             % (T, h, rate_str))
 
     if result.bed_transfer is not None:
@@ -406,14 +406,14 @@ def format_cooling_rate_comments(result, cooling_rates):
         list of comment lines (without #*# prefix)
     """
     lines = [
-        "# Calibration T_ambient: %.1f deg C" % result.t_ambient,
+        "# Calibration T_ambient: %.1f\u00b0C" % result.t_ambient,
         "#",
-        "# Passive cooling rate at 10 deg C intervals:",
+        "# Passive cooling rate at 10\u00b0C intervals:",
     ]
 
     for T, rate, is_cal in cooling_rates:
         marker = "  (calibrated)" if is_cal else ""
         lines.append(
-            "#   T=%3d deg C: %+.2f deg C/min%s" % (int(T), rate, marker))
+            "#   T=%3d\u00b0C: %+.2f\u00b0C/min%s" % (int(T), rate, marker))
 
     return lines

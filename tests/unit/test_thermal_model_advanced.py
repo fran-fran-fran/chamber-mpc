@@ -63,7 +63,7 @@ class TestAdvancedModelUpdate:
         # Set S1 sensor that reads a fixed value
         model.set_s2_sensor(lambda t: (30.0, 0.0))
         model.update(0.1, 25.0, 100.0, 1.0)
-        # S1 reading should affect the heater state estimate
+        # S2 reading should affect the heater state estimate
         # (correction pushes state_heater_temp toward S1 reading)
 
     def test_model_without_s1_uses_state(self):
