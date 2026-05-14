@@ -7,7 +7,7 @@
 # Description: Kalman filter for state estimation in thermal models.
 #              Supports 2-state (basic) and 4-state (advanced) models.
 #              Computes optimal per-state correction gains from the
-#              prediction error covariance, replacing fixed smoothing.
+#              prediction error covariance.
 
 
 class KalmanFilter2:
@@ -22,14 +22,14 @@ class KalmanFilter2:
     (model reliable).
     """
 
-    def __init__(self, process_noise_chamber, process_noise_sensor,
-                 measurement_noise):
+    def __init__(self, process_noise_chamber, process_noise_s1,
+                 measurement_noise_s1):
         # Q diagonal: process noise variances
         self.q_chamber = float(process_noise_chamber)
-        self.q_sensor = float(process_noise_sensor)
+        self.q_s1 = float(process_noise_s1)
 
         # R: measurement noise variance (scalar, one measurement)
-        self.r = float(measurement_noise)
+        self.r = float(measurement_noise_s1)
 
         # P: state covariance matrix (2x2, stored as 4 elements)
         # Initialize with moderate uncertainty
@@ -40,9 +40,9 @@ class KalmanFilter2:
 
         # Last computed gains (for diagnostics)
         self.k_chamber = 0.0
-        self.k_sensor = 0.0
+        self.k_s1 = 0.0
 
-    def predict(self, dt, sensor_responsiveness):
+    def predict(self, dt, s1_responsiveness):
         """Propagate covariance forward (predict step).
 
         The state transition for covariance is:
@@ -51,9 +51,9 @@ class KalmanFilter2:
         where A is the Jacobian of the state dynamics:
             A = [[1, 0], [r*dt, 1-r*dt]]
 
-        with r = sensor_responsiveness.
+        with r = s1_responsiveness.
         """
-        r = sensor_responsiveness * dt
+        r = s1_responsiveness * dt
 
         # A * P (matrix multiply A by P)
         # A = [[1, 0], [r, 1-r]]
@@ -67,7 +67,7 @@ class KalmanFilter2:
         self.p00 = ap00 + self.q_chamber * dt
         self.p01 = ap01 * (1.0 - r) + ap00 * r
         self.p10 = ap10 + ap11 * r  # should equal p01 (symmetric)
-        self.p11 = ap10 * r + ap11 * (1.0 - r) + self.q_sensor * dt
+        self.p11 = ap10 * r + ap11 * (1.0 - r) + self.q_s1 * dt
 
         # Enforce symmetry (numerical drift)
         self.p01 = (self.p01 + self.p10) * 0.5
@@ -79,7 +79,7 @@ class KalmanFilter2:
         The measurement matrix H = [0, 1] (we observe T_sensor).
 
         Args:
-            innovation: (temp_measured - state_sensor_temp)
+            innovation: (temp_measured - state_s1_temp)
 
         Returns:
             (correction_chamber, correction_sensor) tuple
@@ -93,15 +93,15 @@ class KalmanFilter2:
         # Kalman gain: K = P * H^T / S
         # P * H^T = [P[0,1], P[1,1]]^T
         self.k_chamber = self.p01 / s
-        self.k_sensor = self.p11 / s
+        self.k_s1 = self.p11 / s
 
         # Update covariance: P = (I - K*H) * P
         # K*H = [[0, k0], [0, k1]]
         # (I - K*H) = [[1, -k0], [0, 1-k1]]
         new_p00 = self.p00 - self.k_chamber * self.p10
         new_p01 = self.p01 - self.k_chamber * self.p11
-        new_p10 = self.p10 - self.k_sensor * self.p10
-        new_p11 = self.p11 - self.k_sensor * self.p11
+        new_p10 = self.p10 - self.k_s1 * self.p10
+        new_p11 = self.p11 - self.k_s1 * self.p11
 
         self.p00 = new_p00
         self.p01 = (new_p01 + new_p10) * 0.5  # enforce symmetry
@@ -109,11 +109,11 @@ class KalmanFilter2:
         self.p11 = new_p11
 
         # Corrections
-        return (self.k_chamber * innovation, self.k_sensor * innovation)
+        return (self.k_chamber * innovation, self.k_s1 * innovation)
 
     def get_gains(self):
         """Return current Kalman gains for diagnostics."""
-        return (self.k_chamber, self.k_sensor)
+        return (self.k_chamber, self.k_s1)
 
 
 class KalmanFilter4:
@@ -324,15 +324,15 @@ class KalmanFilter3:
     providing offset-free control without integral windup.
     """
 
-    def __init__(self, process_noise_chamber, process_noise_sensor,
-                 process_noise_disturbance, measurement_noise):
+    def __init__(self, process_noise_chamber, process_noise_s1,
+                 process_noise_disturbance, measurement_noise_s1):
         # Q diagonal: process noise variances
         self.q_chamber = float(process_noise_chamber)
-        self.q_sensor = float(process_noise_sensor)
+        self.q_s1 = float(process_noise_s1)
         self.q_disturbance = float(process_noise_disturbance)
 
         # R: measurement noise variance (scalar, one measurement)
-        self.r = float(measurement_noise)
+        self.r = float(measurement_noise_s1)
 
         # P: state covariance matrix (3x3, stored as 9 elements, row-major)
         # Initialize with moderate uncertainty
@@ -344,10 +344,10 @@ class KalmanFilter3:
 
         # Last computed gains (for diagnostics)
         self.k_chamber = 0.0
-        self.k_sensor = 0.0
+        self.k_s1 = 0.0
         self.k_disturbance = 0.0
 
-    def predict(self, dt, sensor_responsiveness, chamber_heat_capacity):
+    def predict(self, dt, s1_responsiveness, chamber_heat_capacity):
         """Propagate covariance forward (predict step).
 
         The state transition Jacobian A:
@@ -363,7 +363,7 @@ class KalmanFilter3:
         The coupling dt/C converts the disturbance (watts) to
         temperature change per tick.
         """
-        r = sensor_responsiveness * dt
+        r = s1_responsiveness * dt
         p = self.p
 
         # A matrix (3x3):
@@ -400,7 +400,7 @@ class KalmanFilter3:
 
         # Add Q (diagonal)
         new_p[0] += self.q_chamber * dt
-        new_p[4] += self.q_sensor * dt
+        new_p[4] += self.q_s1 * dt
         new_p[8] += self.q_disturbance * dt
 
         # Enforce symmetry
@@ -418,7 +418,7 @@ class KalmanFilter3:
         Measurement matrix H = [0, 1, 0] (we observe T_sensor).
 
         Args:
-            innovation: (temp_measured - state_sensor_temp)
+            innovation: (temp_measured - state_s1_temp)
 
         Returns:
             (correction_chamber, correction_sensor, correction_disturbance)
@@ -434,7 +434,7 @@ class KalmanFilter3:
         # Kalman gain: K = P * H^T / S
         # P * H^T = [P[0,1], P[1,1], P[2,1]]^T
         self.k_chamber = p[1] / s
-        self.k_sensor = p[4] / s
+        self.k_s1 = p[4] / s
         self.k_disturbance = p[7] / s
 
         # Update covariance: P = (I - K*H) * P
@@ -442,7 +442,7 @@ class KalmanFilter3:
         # (I - K*H) = [[1, -k0, 0], [0, 1-k1, 0], [0, -k2, 1]]
         new_p = list(p)
         k0 = self.k_chamber
-        k1 = self.k_sensor
+        k1 = self.k_s1
         k2 = self.k_disturbance
         # Row 0: [1, -k0, 0] * P
         new_p[0] = p[0] - k0 * p[3]
@@ -469,10 +469,10 @@ class KalmanFilter3:
         # Corrections
         return (
             self.k_chamber * innovation,
-            self.k_sensor * innovation,
+            self.k_s1 * innovation,
             self.k_disturbance * innovation,
         )
 
     def get_gains(self):
         """Return current Kalman gains for diagnostics."""
-        return (self.k_chamber, self.k_sensor, self.k_disturbance)
+        return (self.k_chamber, self.k_s1, self.k_disturbance)

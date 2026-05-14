@@ -87,7 +87,7 @@ class HInterpolator:
 
     @staticmethod
     def parse_config_string(value):
-        """Parse h_calibration_points from config string.
+        """Parse ambient_transfer_points from config string.
 
         Format (multi-line, tab-indented):
             60.0, 0.1241
@@ -105,13 +105,13 @@ class HInterpolator:
             parts = line.split(',')
             if len(parts) != 2:
                 raise ValueError(
-                    "h_calibration_points line must be 'T, h': %s" % line)
+                    "ambient_transfer_points line must be 'T, h': %s" % line)
             try:
                 t = float(parts[0].strip())
                 h = float(parts[1].strip())
             except ValueError:
                 raise ValueError(
-                    "Cannot parse h_calibration_points values: %s" % line)
+                    "Cannot parse ambient_transfer_points values: %s" % line)
             if h < 0:
                 raise ValueError(
                     "h value must be non-negative: %s" % line)

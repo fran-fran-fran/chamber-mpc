@@ -11,7 +11,7 @@ Replaces standard PID control with a model-based controller that provides feedfo
 - **Single-point calibration** - for narrow operating ranges (e.g. printer chambers at 50-80 deg C), one calibration point is sufficient
 - **Heating element temperature limiting** - optional secondary sensor constrains output to protect heating elements from overtemperature, with model-aware anti-windup
 - **Bed heater feedforward** - optional measured disturbance rejection for printer chambers where the bed contributes heat
-- **Auto-estimated smoothing** - calibration routine estimates the optimal model correction aggressiveness from prediction error statistics
+- **Kalman filter with disturbance estimation** - optimal per-state correction gains adapt automatically to operating conditions, with an integrating disturbance state that provides offset-free control regardless of model accuracy
 - **Progressive calibration** - multi-point calibration runs in one ascending pass without cool-down between points
 
 ## Requirements
@@ -45,9 +45,9 @@ To uninstall:
 [chamber_mpc]
 heater: airfryer
 heater_power: 1800
-heating_element_sensor: element
-heating_element_max_temp: 270
-heating_element_margin: 20
+secondary_sensor: element
+s2_safe_temp: 270
+s2_safe_temp_zone: 20
 ```
 
 ### 3D printer heated chamber
@@ -66,34 +66,29 @@ bed_transfer: 0.35
 |-----------|-------------|---------|-------------|
 | `heater` | required | none | Name of the `[heater_generic]` to control |
 | `heater_power` | required | none | Heater nameplate power in watts |
-| `model_type` | optional | `basic` | Thermal model type: `basic` (2-state) or `advanced` (4-state) |
-| `estimator_type` | optional | `fixed` | State estimator type: `fixed` (constant smoothing) or `kalman` (adaptive gains) |
+| `model_type` | optional | basic | Thermal model type: `basic` (2-state) or `advanced` (4-state) |
 | `chamber_heat_capacity` | required | calibrated | Chamber thermal mass in J/K |
-| `sensor_responsiveness` | required | calibrated | S2 sensor lag coefficient (1/s) |
-| `smoothing` | optional | 0.5 | Model correction aggressiveness for basic+fixed mode (0.0-1.0) |
-| `smoothing_heater` | optional | min(0.95, smoothing*1.4) | Override correction aggressiveness for heater/S1 pair in advanced+fixed mode (0.0-1.0). Derived from smoothing if not set |
-| `smoothing_chamber` | optional | smoothing | Override correction aggressiveness for chamber/S2 pair in advanced+fixed mode (0.0-1.0). Derived from smoothing if not set |
-| `target_reach_time` | optional | 2.0 | Prediction horizon in seconds |
-| `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the heater's max_temp minus this margin (deg C) |
-| `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature used by the model (deg C) |
+| `s1_responsiveness` | required | calibrated | S1 lag coefficient [1/s]. S1 is the main sensor (used for setpoint tracking), as configured in the `[heater_generic]` defined in `heater` |
+| `target_reach_time` | optional | 2.0 | Prediction horizon of the MPC [s] |
+| `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the `heater`'s `max_temp` minus this margin [°C], to avoid shutdown due to temperature overshoot |
+| `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature [°C] used by the model |
 | `ambient_temp_sensor` | optional | none | Name of external `[temperature_sensor]` for ambient temperature |
-| `h_calibration_points` | required | calibrated | Temperature-dependent h(T) values (multi-line T, h pairs) |
-| `heating_element_sensor` | conditional | none | Name of `[temperature_sensor]` on heating element. Required for advanced model, optional for basic |
-| `heating_element_max_temp` | optional | 250.0 | Heating element temperature hard limit. Must be greater than heater max_temp (deg C) |
-| `heating_element_margin` | optional | 20.0 | Zone below the hard limit where output starts tapering down proportionally (deg C) |
-| `bed_heater` | optional | none | Name of bed heater for disturbance feedforward |
-| `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient in W/K |
-| `heater_heat_capacity` | advanced only | calibrated | Heating element thermal mass in J/K |
-| `heater_chamber_coupling` | advanced only | calibrated | Heater-to-chamber coupling coefficient in W/K |
-| `s1_responsiveness` | advanced only | calibrated | S1 sensor lag coefficient (1/s) |
-| `process_noise_chamber` | kalman only | calibrated | Process noise variance for chamber state |
-| `process_noise_sensor` | kalman only | calibrated | Process noise variance for sensor state (basic+kalman) |
-| `process_noise_heater` | kalman only | calibrated | Process noise variance for heater state (advanced+kalman) |
-| `process_noise_s1` | kalman only | calibrated | Process noise variance for S1 state (advanced+kalman) |
-| `process_noise_s2` | kalman only | calibrated | Process noise variance for S2 state (advanced+kalman) |
-| `measurement_noise` | kalman only | calibrated | Measurement noise variance (basic+kalman) |
-| `measurement_noise_s1` | kalman only | calibrated | S1 measurement noise variance (advanced+kalman) |
-| `measurement_noise_s2` | kalman only | calibrated | S2 measurement noise variance (advanced+kalman) |
+| `ambient_transfer_points` | required | calibrated | Temperature-dependent chamber-to-ambient heat transfer coefficient points. Defined as multi-line points (T, h(T)), with minimum of one point |
+| `secondary_sensor` | conditional | none | Name of the `[temperature_sensor]` placed on (or closer to) the heating element. This sensor is useful when the main sensor (defined in `heater`) is used to measure the chamber temperature. This is then used for limiting the temperature of the heating element for safety/longevity. Required for advanced model, optional for basic |
+| `s2_safe_temp` | optional | 250.0 | Temperature limit [°C] for the heating element. The control output is turned off when the `secondary_sensor` reaches this temperature. Must be greater than `heater`'s `max_temp`. Must be smaller than `heating_element_sensor`'s `max_temp` |
+| `s2_safe_temp_zone` | optional | 20.0 | Temperature zone [°C] below the `s2_safe_temp` where control output starts tapering down proportionally to 0 |
+| `bed_heater` | optional | none | Name of `[heater_bed]` for bed disturbance feedforward |
+| `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient [W/K] |
+| `heater_heat_capacity` | required for advanced model | calibrated | Heating element thermal mass [J/K] |
+| `heating_element_transfer` | required for advanced model | calibrated | Heater-to-chamber heat transfer coefficient [W/K] |
+| `s2_responsiveness` | required for advanced model | calibrated | S2 lag coefficient [1/s]. S2 is the optional secondary sensor, as defined in `secondary_sensor` |
+| `process_noise_chamber` | optional | 1.0 | Kalman Q matrix: process noise for chamber state $Q_c$ |
+| `process_noise_s1` | optional | 0.1 | Kalman Q matrix: process noise for S1 state $Q_{s1}$ |
+| `process_noise_disturbance` | optional | 10.0 | Kalman Q matrix: process noise for disturbance state $Q_d$ (controls how fast the disturbance adapts) |
+| `measurement_noise_s1` | optional | 0.5 | Kalman R: S1 measurement noise variance $R$ (basic model) or $R_1$ in R matrix (advanced model) |
+| `process_noise_heater` | optional (advanced model only) | 1.0 | Kalman Q matrix: process noise for heater state $Q_h$ |
+| `process_noise_s2` | optional (advanced model only) | 0.5 | Kalman Q matrix: process noise for S2 state $Q_{s2}$ |
+| `measurement_noise_s2` | optional (advanced model only) | 0.5 | Kalman R matrix: S2 measurement noise variance $R_2$ |
 
 ## Calibration
 
@@ -135,7 +130,7 @@ Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to pri
 The controller maintains a two-state thermal model:
 
 1. **Chamber temperature** - estimated true chamber temperature (thermal mass)
-2. **Sensor temperature** - estimated sensor reading (lagged by sensor_responsiveness)
+2. **Sensor temperature** - estimated sensor reading (lagged by s1_responsiveness)
 
 Each control tick:
 1. Propagate model forward using last actual applied power
@@ -169,7 +164,7 @@ chamber-mpc/
 |   +-- kalman.py              # Kalman filters for 2-state and 4-state models
 |   +-- h_interpolator.py      # h(T) interpolation from calibration points
 |   +-- control.py             # Klipper heater control interface
-|   +-- calibrate.py           # Calibration analysis (step response, smoothing)
+|   +-- calibrate.py           # Calibration analysis (step response, h identification)
 |   +-- calibrate_runner.py    # Calibration sequence orchestration
 +-- scripts/
 |   +-- install.sh             # Install / --uninstall

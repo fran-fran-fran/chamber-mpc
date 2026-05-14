@@ -10,19 +10,18 @@
 #              The calibration is fully self-bootstrapping:
 #              - Phase 0: Measure or accept ambient temperature
 #              - Phase 1: Open-loop step response to first target
-#                         (identifies C, sensor_responsiveness, rough h)
+#                         (identifies C, s1_responsiveness, rough h)
 #              - Phase 2: MPC holds at each target using progressively
 #                         refined parameters (identifies h at each point)
 #              - Phase 3: Optional bed transfer measurement using
 #                         fully calibrated MPC
-#              - Phase 4: Estimate smoothing from prediction errors
 #
 #              No PID or other external controller is needed.
 
 import logging
 
 from .calibrate import (
-    StepResponseAnalyzer, SmoothingEstimator, CalibrationResult,
+    StepResponseAnalyzer, CalibrationResult,
     estimate_h_from_cooling,
     compute_cooling_rates, format_calibration_report,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
@@ -116,10 +115,9 @@ class MpcChamberCalibrateRunner:
 
     Sequence:
         Phase 0: Measure T_ambient (or accept from T_AMBIENT parameter)
-        Phase 1: Step response to first point (identify C, sensor_resp, rough h)
+        Phase 1: Step response to first point (identify C, s1_resp, rough h)
         Phase 2: MPC holds at each point (identify h at each temperature)
         Phase 3: Optional bed transfer using calibrated MPC (identify h_bed)
-        Phase 4: Estimate smoothing from prediction errors, save results
     """
 
     def __init__(self, printer, heater, orig_control):
@@ -202,12 +200,12 @@ class MpcChamberCalibrateRunner:
             step_data, heater_power, result.t_ambient)
         step_result = analyzer.analyze()
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
-        result.sensor_responsiveness = step_result['sensor_responsiveness']
+        result.s1_responsiveness = step_result['s1_responsiveness']
 
         gcmd.respond_info(
-            "  C = %.1f J/K, sensor_resp = %.4f"
+            "  C = %.1f J/K, s1_resp = %.4f"
             % (result.chamber_heat_capacity,
-               result.sensor_responsiveness))
+               result.s1_responsiveness))
 
         # Phase 1b: estimate rough h from passive cooling
         if initial_h is not None:
@@ -235,7 +233,6 @@ class MpcChamberCalibrateRunner:
         gcmd.respond_info(
             "Phase 2: Steady-state measurements (MPC self-bootstrapping)...")
 
-        all_prediction_errors = []
         for i, target in enumerate(points):
             gcmd.respond_info(
                 "  Point %d/%d: %.0f deg C" % (i + 1, len(points), target))
@@ -272,10 +269,6 @@ class MpcChamberCalibrateRunner:
             result.h_points.append((target, h))
             gcmd.respond_info("    h = %.4f W/K" % h)
 
-            # Collect prediction errors for smoothing estimation
-            errors = self._collect_prediction_errors(model, 60.0)
-            all_prediction_errors.extend(errors)
-
             # Swap back to tuning control between points
             # (MPC will be rebuilt with updated h points for next target)
             self.heater.set_control(tuning)
@@ -291,10 +284,6 @@ class MpcChamberCalibrateRunner:
             gcmd.respond_info(
                 "  bed_transfer = %.4f W/K" % result.bed_transfer)
 
-        # Phase 4: estimate smoothing
-        result.smoothing = SmoothingEstimator.estimate(all_prediction_errors)
-        gcmd.respond_info(
-            "Phase 4: Estimated smoothing = %.2f" % result.smoothing)
 
         return result
 
@@ -315,17 +304,15 @@ class MpcChamberCalibrateRunner:
         """
         kalman = KalmanFilter3(
             process_noise_chamber=1.0,
-            process_noise_sensor=0.1,
+            process_noise_s1=0.1,
             process_noise_disturbance=500.0,
             measurement_noise=0.5,
         )
         model = ThermalModel(
             chamber_heat_capacity=result.chamber_heat_capacity,
-            sensor_responsiveness=result.sensor_responsiveness,
+            s1_responsiveness=result.s1_responsiveness,
             h_interpolator=HInterpolator(h_points),
             heater_power=heater_power,
-            smoothing=0.5,
-            estimator_type='kalman',
             kalman_filter=kalman,
         )
         current_temp, _ = self.heater.get_temp(
@@ -476,28 +463,6 @@ class MpcChamberCalibrateRunner:
             return 0.0
         return sum(samples) / len(samples)
 
-    def _collect_prediction_errors(self, model, duration_s):
-        """Collect prediction errors from a running MPC model.
-
-        The model is already controlling the heater. We record the
-        difference between measurement and model prediction on each tick.
-        Used for smoothing estimation.
-
-        Returns list of prediction error values.
-        """
-        errors = []
-        start_time = [None]
-
-        def process(eventtime):
-            if start_time[0] is None:
-                start_time[0] = eventtime
-            temp, _ = self.heater.get_temp(eventtime)
-            errors.append(temp - model.state_sensor_temp)
-            return eventtime - start_time[0] < duration_s
-
-        self.printer.wait_while(process)
-        return errors
-
     # -- Phase 3: Bed transfer --
 
     def _measure_bed_transfer(self, gcmd, bed_temp, chamber_target,
@@ -614,7 +579,7 @@ class MpcChamberCalibrateRunner:
                     "    [status] chamber=%.1f, sensor=%.1f, "
                     "ambient=%.1f, power=%.1f W, "
                     "avg=%.1f W (%.0f%%)%s%s"
-                    % (status['temp_chamber'], status['temp_sensor'],
+                    % (status['temp_chamber'], status['temp_s1'],
                        status['temp_ambient'], status['power'],
                        status['avg_power'], status['avg_duty'] * 100,
                        d_str, k_str))
@@ -647,11 +612,8 @@ class MpcChamberCalibrateRunner:
             cfgname, 'chamber_heat_capacity',
             "%.1f" % result.chamber_heat_capacity)
         configfile.set(
-            cfgname, 'sensor_responsiveness',
-            "%.4f" % result.sensor_responsiveness)
-        configfile.set(
-            cfgname, 'smoothing',
-            "%.2f" % result.smoothing)
+            cfgname, 's1_responsiveness',
+            "%.4f" % result.s1_responsiveness)
         configfile.set(
             cfgname, 'ambient_temp',
             "%.1f" % result.t_ambient)
@@ -659,7 +621,7 @@ class MpcChamberCalibrateRunner:
         # h calibration points
         h_interp = HInterpolator(result.h_points)
         configfile.set(
-            cfgname, 'h_calibration_points',
+            cfgname, 'ambient_transfer_points',
             h_interp.format_config_string())
 
         if result.bed_transfer is not None:

@@ -2,18 +2,20 @@
 import pytest
 from chamber_mpc.thermal_model import ThermalModel
 from chamber_mpc.h_interpolator import HInterpolator
+from chamber_mpc.kalman import KalmanFilter3
 
 
 def make_model(h_val=0.15, C=360.0, sensor_resp=0.08,
-               heater_power=1800.0, smoothing=0.5):
-    """Create a ThermalModel with simple single-point h."""
+               heater_power=1800.0):
+    """Create a ThermalModel with Kalman filter."""
     h_interp = HInterpolator([(100.0, h_val)])
+    kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
     model = ThermalModel(
         chamber_heat_capacity=C,
-        sensor_responsiveness=sensor_resp,
+        s1_responsiveness=sensor_resp,
         h_interpolator=h_interp,
         heater_power=heater_power,
-        smoothing=smoothing,
+        kalman_filter=kalman,
     )
     return model
 
@@ -22,7 +24,7 @@ class TestModelInitialization:
     def test_default_state(self):
         model = make_model()
         assert model.state_chamber_temp == pytest.approx(25.0)
-        assert model.state_sensor_temp == pytest.approx(25.0)
+        assert model.state_s1_temp == pytest.approx(25.0)
         assert model.state_ambient_temp == pytest.approx(25.0)
         assert model.last_power == 0.0
 
@@ -30,7 +32,7 @@ class TestModelInitialization:
         model = make_model()
         model.set_initial_state(85.0)
         assert model.state_chamber_temp == pytest.approx(85.0)
-        assert model.state_sensor_temp == pytest.approx(85.0)
+        assert model.state_s1_temp == pytest.approx(85.0)
 
     def test_set_ambient(self):
         model = make_model()
@@ -95,7 +97,7 @@ class TestModelUpdate:
             t += 0.3
             model.update(t, 25.0 + i * 2.0, 200.0, 1.0)
         # Block should be ahead of sensor due to lag
-        assert model.state_chamber_temp > model.state_sensor_temp
+        assert model.state_chamber_temp > model.state_s1_temp
 
 
 class TestHeatingElementLimit:
@@ -110,7 +112,7 @@ class TestHeatingElementLimit:
         model.set_initial_state(100.0)
         model.set_ambient(22.0)
         # Set up element sensor that reads at max
-        model.set_heating_element_limit(
+        model.set_secondary_sensor_limit(
             lambda t: (270.0, 0.0),  # at max temp
             max_temp=270.0, margin=20.0)
         duty = model.update(0.1, 100.0, 200.0, 1.0)
@@ -123,7 +125,7 @@ class TestHeatingElementLimit:
         # Element at pullback_start + half margin
         # max=270, margin=20, pullback_start=250
         # element at 260 -> headroom=10, scale=10/20=0.5
-        model.set_heating_element_limit(
+        model.set_secondary_sensor_limit(
             lambda t: (260.0, 0.0),
             max_temp=270.0, margin=20.0)
 
@@ -142,7 +144,7 @@ class TestHeatingElementLimit:
         model.set_initial_state(100.0)
         model.set_ambient(22.0)
         # Element well below pullback zone
-        model.set_heating_element_limit(
+        model.set_secondary_sensor_limit(
             lambda t: (200.0, 0.0),
             max_temp=270.0, margin=20.0)
 
@@ -159,7 +161,7 @@ class TestHeatingElementLimit:
         model = make_model()
         model.set_initial_state(100.0)
         model.set_ambient(22.0)
-        model.set_heating_element_limit(
+        model.set_secondary_sensor_limit(
             lambda t: (270.0, 0.0),  # element at max -> output = 0
             max_temp=270.0, margin=20.0)
 
@@ -198,26 +200,13 @@ class TestBedDisturbance:
 
 class TestModelCorrection:
     def test_correction_adjusts_both_states(self):
-        model = make_model(smoothing=0.8)
+        model = make_model()
         model.set_initial_state(100.0)
         # Feed a measurement that's higher than model predicts
         model.update(0.1, 105.0, 100.0, 1.0)
         # Both chamber and sensor should have been corrected upward
         assert model.state_chamber_temp > 100.0
-        assert model.state_sensor_temp > 100.0
-
-    def test_low_smoothing_corrects_less(self):
-        model_low = make_model(smoothing=0.1)
-        model_low.set_initial_state(100.0)
-        model_low.update(0.1, 110.0, 100.0, 1.0)
-        correction_low = model_low.state_sensor_temp - 100.0
-
-        model_high = make_model(smoothing=0.9)
-        model_high.set_initial_state(100.0)
-        model_high.update(0.1, 110.0, 100.0, 1.0)
-        correction_high = model_high.state_sensor_temp - 100.0
-
-        assert correction_low < correction_high
+        assert model.state_s1_temp > 100.0
 
 
 class TestGetStatus:
@@ -225,7 +214,7 @@ class TestGetStatus:
         model = make_model()
         status = model.get_status()
         assert 'temp_chamber' in status
-        assert 'temp_sensor' in status
+        assert 'temp_s1' in status
         assert 'temp_ambient' in status
         assert 'power' in status
         assert 'avg_power' in status
@@ -242,15 +231,13 @@ class TestGetStatus:
 
 class TestBasicKalmanEstimator:
     def test_kalman_mode_runs(self):
-        from chamber_mpc.kalman import KalmanFilter2
-        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
         h_interp = HInterpolator([(100.0, 0.15)])
         model = ThermalModel(
             chamber_heat_capacity=360.0,
-            sensor_responsiveness=0.08,
+            s1_responsiveness=0.08,
             h_interpolator=h_interp,
             heater_power=1800.0,
-            estimator_type='kalman',
             kalman_filter=kalman,
         )
         model.set_initial_state(25.0)
@@ -260,15 +247,13 @@ class TestBasicKalmanEstimator:
         assert model.state_chamber_temp > 25.0
 
     def test_kalman_gives_different_gains_per_state(self):
-        from chamber_mpc.kalman import KalmanFilter2
-        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
         h_interp = HInterpolator([(100.0, 0.15)])
         model = ThermalModel(
             chamber_heat_capacity=360.0,
-            sensor_responsiveness=0.08,
+            s1_responsiveness=0.08,
             h_interpolator=h_interp,
             heater_power=1800.0,
-            estimator_type='kalman',
             kalman_filter=kalman,
         )
         model.set_initial_state(100.0)
@@ -276,20 +261,18 @@ class TestBasicKalmanEstimator:
         # Run a few ticks to let gains converge
         for i in range(20):
             model.update(0.1 + i * 0.3, 100.5, 100.0, 1.0)
-        k_chamber, k_sensor = kalman.get_gains()
+        k_chamber, k_s1, k_disturbance = kalman.get_gains()
         # Sensor gain should differ from chamber gain
-        assert k_chamber != k_sensor
+        assert k_chamber != k_s1
 
     def test_kalman_no_crash_with_large_innovation(self):
-        from chamber_mpc.kalman import KalmanFilter2
-        kalman = KalmanFilter2(1.0, 1.0, 0.5)
+        kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
         h_interp = HInterpolator([(100.0, 0.15)])
         model = ThermalModel(
             chamber_heat_capacity=360.0,
-            sensor_responsiveness=0.08,
+            s1_responsiveness=0.08,
             h_interpolator=h_interp,
             heater_power=1800.0,
-            estimator_type='kalman',
             kalman_filter=kalman,
         )
         model.set_initial_state(25.0)

@@ -7,7 +7,7 @@
 # Description: Two-state thermal model for MPC. Tracks chamber (thermal mass)
 #              temperature and sensor temperature with Euler integration.
 #              Supports h(T) interpolation, bed disturbance feedforward,
-#              and heating element temperature limiting.
+#              and secondary sensor temperature limiting.
 
 from .h_interpolator import HInterpolator
 
@@ -19,35 +19,32 @@ class ThermalModel:
 
     State variables:
         state_chamber_temp:   estimated true chamber temperature (deg C)
-        state_sensor_temp:  estimated sensor reading (deg C, lagged)
+        state_s1_temp:  estimated S1 sensor reading (deg C, lagged)
         state_ambient_temp: estimated ambient temperature (deg C)
 
     Model equation:
         C * dT_chamber/dt = P_heater + P_bed - h(T) * (T_chamber - T_ambient)
-        dT_sensor/dt = sensor_responsiveness * (T_chamber - T_sensor)
+        dT_s1/dt = s1_responsiveness * (T_chamber - T_s1)
     """
 
-    def __init__(self, chamber_heat_capacity, sensor_responsiveness,
-                 h_interpolator, heater_power, smoothing=0.5,
-                 target_reach_time=2.0,
-                 estimator_type='fixed', kalman_filter=None):
+    def __init__(self, chamber_heat_capacity, s1_responsiveness,
+                 h_interpolator, heater_power,
+                 target_reach_time=2.0, kalman_filter=None):
         # Identified parameters
         self.chamber_heat_capacity = float(chamber_heat_capacity)
-        self.sensor_responsiveness = float(sensor_responsiveness)
+        self.s1_responsiveness = float(s1_responsiveness)
         self.h_interpolator = h_interpolator
         self.heater_power = float(heater_power)
 
         # Tuning parameters
-        self.smoothing = float(smoothing)
         self.target_reach_time = float(target_reach_time)
 
-        # Estimator
-        self.estimator_type = estimator_type
+        # Kalman filter
         self.kalman = kalman_filter
 
         # State
         self.state_chamber_temp = AMBIENT_TEMP_DEFAULT
-        self.state_sensor_temp = AMBIENT_TEMP_DEFAULT
+        self.state_s1_temp = AMBIENT_TEMP_DEFAULT
         self.state_ambient_temp = AMBIENT_TEMP_DEFAULT
         self.state_disturbance = 0.0  # offset-free MPC disturbance (watts)
         self.last_power = 0.0
@@ -61,10 +58,10 @@ class ThermalModel:
         self.bed_transfer = 0.0
         self._bed_temp_fn = None  # callable returning (temp, target) tuple
 
-        # Heating element limit (optional)
-        self._heating_element_temp_fn = None
-        self.heating_element_max_temp = 250.0
-        self.heating_element_margin = 20.0
+        # Secondary sensor limit (optional)
+        self._secondary_sensor_fn = None
+        self.s2_safe_temp = 250.0
+        self.s2_safe_temp_zone = 20.0
 
         # Ambient sensor (optional)
         self._ambient_temp_fn = None
@@ -72,7 +69,7 @@ class ThermalModel:
     def set_initial_state(self, temp):
         """Set initial state from a known temperature."""
         self.state_chamber_temp = temp
-        self.state_sensor_temp = temp
+        self.state_s1_temp = temp
 
     def set_ambient(self, temp):
         """Set known ambient temperature."""
@@ -88,17 +85,17 @@ class ThermalModel:
         self._bed_temp_fn = bed_temp_fn
         self.bed_transfer = float(bed_transfer)
 
-    def set_heating_element_limit(self, temp_fn, max_temp, margin):
-        """Configure heating element temperature limiting.
+    def set_secondary_sensor_limit(self, temp_fn, max_temp, margin):
+        """Configure secondary sensor temperature limiting.
 
         Args:
             temp_fn: callable(read_time) returning (temp, target) tuple
-            max_temp: maximum allowed heating element temperature (deg C)
+            max_temp: maximum allowed secondary sensor temperature (deg C)
             margin: proportional pullback zone width (deg C)
         """
-        self._heating_element_temp_fn = temp_fn
-        self.heating_element_max_temp = float(max_temp)
-        self.heating_element_margin = float(margin)
+        self._secondary_sensor_fn = temp_fn
+        self.s2_safe_temp = float(max_temp)
+        self.s2_safe_temp_zone = float(margin)
 
     def set_ambient_sensor(self, temp_fn):  # pragma: no cover
         """Configure an external ambient temperature sensor.
@@ -139,8 +136,8 @@ class ThermalModel:
         # -- Compute desired output --
         u_desired = self._compute_output(target_temp, read_time, max_power)
 
-        # -- Apply heating element constraint --
-        u_actual = self._constrain_for_heating_element(read_time, u_desired)
+        # -- Apply secondary sensor constraint --
+        u_actual = self._constrain_for_secondary_sensor(read_time, u_desired)
 
         # -- Clamp to heater limits --
         u_actual = max(0.0, min(max_power, u_actual))
@@ -183,41 +180,35 @@ class ThermalModel:
         )
         self.state_chamber_temp += dT_chamber
 
-        # Sensor temperature update (lagged response)
-        dT_sensor = (
-            (self.state_chamber_temp - self.state_sensor_temp)
-            * self.sensor_responsiveness * dt
+        # S1 sensor temperature update (lagged response)
+        dT_s1 = (
+            (self.state_chamber_temp - self.state_s1_temp)
+            * self.s1_responsiveness * dt
         )
-        self.state_sensor_temp += dT_sensor
+        self.state_s1_temp += dT_s1
 
         # Kalman predict step
-        if self.estimator_type == 'kalman' and self.kalman is not None:
+        if self.kalman is not None:
             if hasattr(self.kalman, 'q_disturbance'):
-                self.kalman.predict(dt, self.sensor_responsiveness,
+                self.kalman.predict(dt, self.s1_responsiveness,
                                     self.chamber_heat_capacity)
             else:
-                self.kalman.predict(dt, self.sensor_responsiveness)
+                self.kalman.predict(dt, self.s1_responsiveness)
 
     def _correct(self, dt, temp_measured):
         """Correct model state from measurement.
 
-        Fixed mode: equal correction to both states (Kalico pattern).
-        Kalman mode: per-state optimal gains from covariance.
+        Per-state optimal gains from Kalman filter, with optional
+        disturbance state correction (KalmanFilter3).
         """
-        innovation = temp_measured - self.state_sensor_temp
+        innovation = temp_measured - self.state_s1_temp
 
-        if self.estimator_type == 'kalman' and self.kalman is not None:
+        if self.kalman is not None:
             corrections = self.kalman.update(innovation)
             self.state_chamber_temp += corrections[0]
-            self.state_sensor_temp += corrections[1]
+            self.state_s1_temp += corrections[1]
             if len(corrections) > 2:
                 self.state_disturbance += corrections[2]
-        else:
-            effective_smoothing = 1.0 - (1.0 - self.smoothing) ** dt
-            adjustment = innovation * effective_smoothing
-            # Apply correction to both states (Kalico pattern)
-            self.state_chamber_temp += adjustment
-            self.state_sensor_temp += adjustment
 
     def _update_ambient(self, dt, read_time):
         """Update ambient temperature estimate.
@@ -230,7 +221,7 @@ class ThermalModel:
 
         The Kalico hotend MPC uses adaptive estimation because hotend
         dynamics are fast and model errors are small. Chamber dynamics
-        are slow and small biases in h or sensor_responsiveness cause
+        are slow and small biases in h or s1_responsiveness cause
         the adaptive estimator to drift over minutes.
         """
         if self._ambient_temp_fn is not None:  # pragma: no cover
@@ -283,29 +274,29 @@ class ThermalModel:
 
         return power / self.heater_power
 
-    def _constrain_for_heating_element(self, read_time, u_desired):
-        """Apply heating element temperature limit.
+    def _constrain_for_secondary_sensor(self, read_time, u_desired):
+        """Apply secondary sensor temperature limit.
 
         Returns constrained output. The MPC model propagation uses the
         constrained value (via last_power), preventing windup.
         """
-        if self._heating_element_temp_fn is None:
+        if self._secondary_sensor_fn is None:
             return u_desired
 
         try:  # pragma: no cover
-            temp_element, _ = self._heating_element_temp_fn(read_time)
+            temp_s2, _ = self._secondary_sensor_fn(read_time)
         except Exception:
             return u_desired  # pragma: no cover -- sensor read failure
 
-        if temp_element >= self.heating_element_max_temp:
+        if temp_s2 >= self.s2_safe_temp:
             return 0.0
 
         pullback_start = (
-            self.heating_element_max_temp - self.heating_element_margin
+            self.s2_safe_temp - self.s2_safe_temp_zone
         )
-        if temp_element > pullback_start:
-            headroom = self.heating_element_max_temp - temp_element
-            scale = headroom / self.heating_element_margin
+        if temp_s2 > pullback_start:
+            headroom = self.s2_safe_temp - temp_s2
+            scale = headroom / self.s2_safe_temp_zone
             return u_desired * scale
 
         return u_desired
@@ -330,11 +321,11 @@ class ThermalModel:
         """Return model state for Moonraker/UI."""
         return {
             'temp_chamber': round(self.state_chamber_temp, 2),
-            'temp_sensor': round(self.state_sensor_temp, 2),
+            'temp_s1': round(self.state_s1_temp, 2),
             'temp_ambient': round(self.state_ambient_temp, 2),
             'power': round(self.last_power, 2),
             'avg_power': round(self.get_avg_power(), 2),
             'avg_duty': round(self.get_avg_duty(), 4),
             'disturbance': round(self.state_disturbance, 2),
-            'kalman_gain': self.kalman.get_gains() if self.estimator_type == 'kalman' and self.kalman is not None else None,
+            'kalman_gain': self.kalman.get_gains() if self.kalman is not None else None,
         }

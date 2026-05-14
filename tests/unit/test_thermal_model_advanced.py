@@ -5,21 +5,18 @@ from chamber_mpc.h_interpolator import HInterpolator
 from chamber_mpc.kalman import KalmanFilter4
 
 
-def make_advanced_model(estimator_type='fixed', kalman=None):
+def make_advanced_model(kalman=None):
     h_interp = HInterpolator([(100.0, 5.5)])
     model = ThermalModelAdvanced(
         heater_heat_capacity=50.0,
         chamber_heat_capacity=500.0,
-        heater_chamber_coupling=80.0,
+        heating_element_transfer=80.0,
         s1_responsiveness=0.5,
         s2_responsiveness=0.08,
         h_interpolator=h_interp,
         heater_power=1800.0,
-        smoothing_heater=0.7,
-        smoothing_chamber=0.5,
         target_reach_time=2.0,
-        estimator_type=estimator_type,
-        kalman_filter=kalman,
+        kalman_filter=kalman if kalman else KalmanFilter4(1.0, 1.0, 0.5, 0.5, 0.5, 0.5),
     )
     return model
 
@@ -64,7 +61,7 @@ class TestAdvancedModelUpdate:
         model.set_initial_state(25.0)
         model.set_ambient(25.0)
         # Set S1 sensor that reads a fixed value
-        model.set_s1_sensor(lambda t: (30.0, 0.0))
+        model.set_s2_sensor(lambda t: (30.0, 0.0))
         model.update(0.1, 25.0, 100.0, 1.0)
         # S1 reading should affect the heater state estimate
         # (correction pushes state_heater_temp toward S1 reading)
@@ -83,8 +80,8 @@ class TestAdvancedElementLimit:
         model = make_advanced_model()
         model.set_initial_state(25.0)
         model.set_ambient(25.0)
-        model.heating_element_max_temp = 100.0
-        model.heating_element_margin = 20.0
+        model.s2_safe_temp = 100.0
+        model.s2_safe_temp_zone = 20.0
 
         # Drive the model hard - element should be constrained by model
         for i in range(20):
@@ -95,30 +92,14 @@ class TestAdvancedElementLimit:
         assert model.state_heater_temp < 150.0  # generous bound
 
 
-class TestAdvancedFixedSmoothing:
-    def test_two_smoothing_values_used(self):
-        model = make_advanced_model()
-        assert model.smoothing_heater == 0.7
-        assert model.smoothing_chamber == 0.5
-
-    def test_correction_applies_to_pairs(self):
-        model = make_advanced_model()
-        model.set_initial_state(100.0)
-        model.set_ambient(22.0)
-        # Feed measurements that differ from predictions
-        model.update(0.1, 105.0, 100.0, 1.0)
-        # Both chamber and s2 should be corrected (from S2 measurement)
-        # Both heater and s1 should be corrected (from S1 measurement)
-
 
 class TestAdvancedKalmanEstimator:
     def test_kalman_mode_runs_without_crash(self):
         kalman = KalmanFilter4(1.0, 1.0, 0.5, 0.5, 0.3, 0.3)
-        model = make_advanced_model(
-            estimator_type='kalman', kalman=kalman)
+        model = make_advanced_model(kalman=kalman)
         model.set_initial_state(50.0)
         model.set_ambient(25.0)
-        model.set_s1_sensor(lambda t: (55.0, 0.0))
+        model.set_s2_sensor(lambda t: (55.0, 0.0))
         # Run several ticks - should not crash or produce NaN
         for i in range(10):
             duty = model.update(0.1 + i * 0.3, 52.0, 100.0, 1.0)

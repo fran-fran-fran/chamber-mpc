@@ -2,7 +2,7 @@
 import math
 import pytest
 from chamber_mpc.calibrate import (
-    StepResponseAnalyzer, SmoothingEstimator,
+    StepResponseAnalyzer,
     compute_cooling_rates, CalibrationResult,
     format_calibration_report, format_cooling_rate_comments,
 )
@@ -29,18 +29,18 @@ class TestStepResponseAnalyzer:
         # Should be within 20% of true value
         assert result['chamber_heat_capacity'] == pytest.approx(360.0, rel=0.2)
 
-    def test_identifies_sensor_responsiveness(self):
+    def test_identifies_s1_responsiveness(self):
         samples, _ = self._generate_step_response()
         analyzer = StepResponseAnalyzer(samples, 1800.0, 22.0)
         result = analyzer.analyze()
-        assert result['sensor_responsiveness'] > 0
+        assert result['s1_responsiveness'] > 0
 
     def test_result_has_required_keys(self):
         samples, _ = self._generate_step_response()
         analyzer = StepResponseAnalyzer(samples, 1800.0, 22.0)
         result = analyzer.analyze()
         assert 'chamber_heat_capacity' in result
-        assert 'sensor_responsiveness' in result
+        assert 's1_responsiveness' in result
         assert 'post_chamber_temp' in result
         assert 'post_sensor_temp' in result
 
@@ -49,39 +49,6 @@ class TestStepResponseAnalyzer:
         analyzer = StepResponseAnalyzer(samples, 1800.0, 22.0)
         with pytest.raises(ValueError, match="Not enough"):
             analyzer.analyze()
-
-
-class TestSmoothingEstimator:
-    def test_low_noise_gives_low_smoothing(self):
-        # Model is very accurate - small errors, uncorrelated
-        import random
-        random.seed(42)
-        errors = [random.gauss(0, 0.1) for _ in range(100)]
-        smoothing = SmoothingEstimator.estimate(errors)
-        assert smoothing < 0.6
-
-    def test_high_noise_gives_higher_smoothing(self):
-        import random
-        random.seed(42)
-        # Large systematic errors (model drift)
-        errors = [random.gauss(0, 0.1) + 0.5 * math.sin(i / 10)
-                  for i in range(100)]
-        smoothing = SmoothingEstimator.estimate(errors)
-        assert smoothing > 0.4
-
-    def test_insufficient_data_returns_default(self):
-        smoothing = SmoothingEstimator.estimate([0.1, 0.2, 0.3])
-        assert smoothing == 0.5
-
-    def test_clamps_to_range(self):
-        # Any input should give a result in [0.2, 0.9]
-        import random
-        random.seed(123)
-        for _ in range(10):
-            errors = [random.gauss(0, random.uniform(0.01, 10))
-                      for _ in range(100)]
-            s = SmoothingEstimator.estimate(errors)
-            assert 0.2 <= s <= 0.9
 
 
 class TestComputeCoolingRates:
@@ -125,8 +92,7 @@ class TestFormatting:
     def test_report_includes_parameters(self):
         result = CalibrationResult()
         result.chamber_heat_capacity = 360.0
-        result.sensor_responsiveness = 0.08
-        result.smoothing = 0.45
+        result.s1_responsiveness = 0.08
         result.h_points = [(100.0, 0.15)]
         result.t_ambient = 22.0
         rates = compute_cooling_rates(
@@ -135,13 +101,11 @@ class TestFormatting:
         text = "\n".join(report)
         assert "360.0" in text
         assert "0.0800" in text
-        assert "0.45" in text
 
     def test_report_includes_bed_transfer(self):
         result = CalibrationResult()
         result.chamber_heat_capacity = 360.0
-        result.sensor_responsiveness = 0.08
-        result.smoothing = 0.45
+        result.s1_responsiveness = 0.08
         result.h_points = [(100.0, 0.15)]
         result.t_ambient = 22.0
         result.bed_transfer = 0.35
@@ -181,7 +145,7 @@ class TestShortStepResponse:
         analyzer = StepResponseAnalyzer(samples, P, T_amb)
         result = analyzer.analyze()
         assert result['chamber_heat_capacity'] > 0
-        assert result['sensor_responsiveness'] > 0
+        assert result['s1_responsiveness'] > 0
 
     def test_insufficient_samples_raises(self):
         samples = [(0, 20), (1, 21), (2, 22)]

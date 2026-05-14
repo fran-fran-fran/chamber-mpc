@@ -7,7 +7,7 @@ class TestKalmanFilter2:
     def test_initial_gains_zero(self):
         kf = KalmanFilter2(1.0, 1.0, 0.5)
         assert kf.k_chamber == 0.0
-        assert kf.k_sensor == 0.0
+        assert kf.k_s1 == 0.0
 
     def test_predict_covariance_reaches_steady_state(self):
         kf = KalmanFilter2(1.0, 1.0, 0.5)
@@ -43,7 +43,7 @@ class TestKalmanFilter2:
         kf = KalmanFilter2(1.0, 1.0, 0.5)
         kf.predict(0.3, 0.08)
         kf.update(1.0)
-        assert abs(kf.k_sensor) > abs(kf.k_chamber)
+        assert abs(kf.k_s1) > abs(kf.k_chamber)
 
     def test_gains_converge_over_many_ticks(self):
         kf = KalmanFilter2(1.0, 1.0, 0.5)
@@ -51,7 +51,7 @@ class TestKalmanFilter2:
         for _ in range(100):
             kf.predict(0.3, 0.08)
             kf.update(0.1)
-            gains.append(kf.k_sensor)
+            gains.append(kf.k_s1)
         # Gains should converge (last 10 values nearly identical)
         late_gains = gains[-10:]
         spread = max(late_gains) - min(late_gains)
@@ -64,7 +64,7 @@ class TestKalmanFilter2:
         g = kf.get_gains()
         assert len(g) == 2
         assert g[0] == kf.k_chamber
-        assert g[1] == kf.k_sensor
+        assert g[1] == kf.k_s1
 
     def test_covariance_stays_symmetric(self):
         kf = KalmanFilter2(1.0, 1.0, 0.5)
@@ -157,7 +157,7 @@ class TestKalmanFilter3:
         from chamber_mpc.kalman import KalmanFilter3
         kf = KalmanFilter3(1.0, 0.1, 0.5, 0.5)
         assert kf.q_chamber == 1.0
-        assert kf.q_sensor == 0.1
+        assert kf.q_s1 == 0.1
         assert kf.q_disturbance == 0.5
         assert kf.r == 0.5
 

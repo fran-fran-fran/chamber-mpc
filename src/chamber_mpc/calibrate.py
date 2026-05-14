@@ -5,7 +5,7 @@
 #
 # File: calibrate.py
 # Description: Progressive multi-point MPC calibration. Identifies
-#              chamber_heat_capacity, sensor_responsiveness, and h(T)
+#              chamber_heat_capacity, s1_responsiveness, and h(T)
 #              at multiple operating points in a single ascending pass.
 #              Optionally identifies bed_transfer if BED_TEMP is specified.
 
@@ -24,21 +24,20 @@ STEP_RESPONSE_POWER = 1.0  # full power for step response
 class CalibrationResult:
     """Holds the results of an MPC chamber calibration."""
     __slots__ = (
-        'chamber_heat_capacity', 'sensor_responsiveness', 'smoothing',
+        'chamber_heat_capacity', 's1_responsiveness',
         'h_points', 't_ambient', 'bed_transfer',
     )
 
     def __init__(self):
         self.chamber_heat_capacity = 0.0
-        self.sensor_responsiveness = 0.0
-        self.smoothing = 0.5
+        self.s1_responsiveness = 0.0
         self.h_points = []  # list of (T, h) tuples
         self.t_ambient = 25.0
         self.bed_transfer = None  # None = not calibrated
 
 
 class StepResponseAnalyzer:
-    """Analyzes a step response trajectory to identify C and sensor_responsiveness.
+    """Analyzes a step response trajectory to identify C and s1_responsiveness.
 
     Uses the same mathematical approach as Kalico's MPC calibration:
     - Asymptotic temperature from three evenly-spaced samples
@@ -68,11 +67,11 @@ class StepResponseAnalyzer:
         where the asymptotic method may fail (e.g. heating only to 60 deg C
         from ambient).
 
-        Falls back to the asymptotic method for sensor_responsiveness
+        Falls back to the asymptotic method for s1_responsiveness
         refinement when the data supports it.
 
         Returns:
-            dict with keys: chamber_heat_capacity, sensor_responsiveness,
+            dict with keys: chamber_heat_capacity, s1_responsiveness,
                             post_chamber_temp, post_sensor_temp
         """
         if len(self.samples) < 10:
@@ -98,10 +97,10 @@ class StepResponseAnalyzer:
         # fastest = [time_from_start, temperature_at_max_rate, max_rate]
         denom = (fastest[2] * fastest[0] + self.t_ambient - fastest[1])
         if abs(denom) > 0.01:
-            sensor_responsiveness = fastest[2] / denom
+            s1_responsiveness = fastest[2] / denom
         else:
             # Fallback: conservative default for chamber sensors
-            sensor_responsiveness = 0.1
+            s1_responsiveness = 0.1
 
         # Sanity checks and clamps
         if chamber_heat_capacity <= 0:  # pragma: no cover
@@ -110,29 +109,29 @@ class StepResponseAnalyzer:
                 chamber_heat_capacity)
             chamber_heat_capacity = abs(chamber_heat_capacity)
 
-        if sensor_responsiveness <= 0 or sensor_responsiveness > 10.0:  # pragma: no cover
+        if s1_responsiveness <= 0 or s1_responsiveness > 10.0:  # pragma: no cover
             self.log.warning(
-                "sensor_responsiveness out of range (%.4f), clamping",
-                sensor_responsiveness)
-            sensor_responsiveness = max(0.01, min(10.0,
-                                                   abs(sensor_responsiveness)))
+                "s1_responsiveness out of range (%.4f), clamping",
+                s1_responsiveness)
+            s1_responsiveness = max(0.01, min(10.0,
+                                                   abs(s1_responsiveness)))
 
-        # Try asymptotic method for refined sensor_responsiveness
+        # Try asymptotic method for refined s1_responsiveness
         try:
             asymp = self._try_asymptotic_analysis()  # pragma: no cover
             if asymp is not None:
                 self.log.info(
                     "Asymptotic refinement: asymp_T=%.1f",
                     asymp['asymp_temp'])
-                if 0.001 < asymp['sensor_responsiveness'] < 10.0:
-                    sensor_responsiveness = asymp['sensor_responsiveness']
+                if 0.001 < asymp['s1_responsiveness'] < 10.0:
+                    s1_responsiveness = asymp['s1_responsiveness']
         except Exception as e:
             self.log.info(
                 "Asymptotic analysis skipped (normal for short ramps): %s", e)
 
         return {
             'chamber_heat_capacity': chamber_heat_capacity,
-            'sensor_responsiveness': sensor_responsiveness,
+            's1_responsiveness': s1_responsiveness,
             'post_chamber_temp': end_temp,
             'post_sensor_temp': end_temp,
         }
@@ -140,7 +139,7 @@ class StepResponseAnalyzer:
     def _try_asymptotic_analysis(self):
         """Attempt three-sample asymptotic analysis for refinement.
 
-        Returns dict with asymp_temp and sensor_responsiveness,
+        Returns dict with asymp_temp and s1_responsiveness,
         or None if data is insufficient.
         """
         above_idx = None
@@ -188,11 +187,11 @@ class StepResponseAnalyzer:
         if abs(denom2) < 0.01:
             return None  # pragma: no cover
 
-        sensor_resp = chamber_resp / (1.0 - exp_term / denom2)
+        s1_resp = chamber_resp / (1.0 - exp_term / denom2)
 
         return {
             'asymp_temp': asymp_T,
-            'sensor_responsiveness': sensor_resp,
+            's1_responsiveness': sensor_resp,
         }
 
     def _fastest_rate(self, samples):
@@ -214,43 +213,6 @@ class StepResponseAnalyzer:
         if best[2] <= 0:
             raise ValueError("No positive temperature rise detected")  # pragma: no cover
         return best
-
-
-class SmoothingEstimator:
-    """Estimates optimal smoothing parameter from prediction errors."""
-
-    @staticmethod
-    def estimate(prediction_errors):
-        """Estimate appropriate smoothing from prediction error statistics.
-
-        Args:
-            prediction_errors: list of (T_measured - T_predicted) values
-                               collected during steady-state hold
-
-        Returns:
-            smoothing value between 0.2 and 0.9
-        """
-        if len(prediction_errors) < 30:
-            return 0.5  # not enough data
-
-        total_var = statistics.variance(prediction_errors)
-
-        # Estimate measurement noise from consecutive differences
-        diffs = [prediction_errors[i + 1] - prediction_errors[i]
-                 for i in range(len(prediction_errors) - 1)]
-        noise_var = statistics.variance(diffs) / 2.0
-
-        # Model uncertainty
-        model_var = max(0.0, total_var - noise_var)
-
-        total = noise_var + model_var
-        if total == 0:  # pragma: no cover
-            return 0.5
-
-        # Optimal gain (simplified Kalman)
-        optimal_gain = total / (total + noise_var)
-
-        return max(0.2, min(0.9, optimal_gain))
 
 
 def estimate_h_from_arrival(samples, heater_power, chamber_heat_capacity,
@@ -409,8 +371,7 @@ def format_calibration_report(result, cooling_rates):
     lines = [
         "Calibration complete.",
         "  chamber_heat_capacity   = %.1f J/K" % result.chamber_heat_capacity,
-        "  sensor_responsiveness = %.4f" % result.sensor_responsiveness,
-        "  smoothing             = %.2f (auto-estimated)" % result.smoothing,
+        "  s1_responsiveness = %.4f" % result.s1_responsiveness,
         "",
         "  h(T) calibration:",
     ]

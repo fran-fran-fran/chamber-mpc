@@ -11,7 +11,7 @@ import logging
 
 from .thermal_model import ThermalModel
 from .thermal_model_advanced import ThermalModelAdvanced
-from .kalman import KalmanFilter2, KalmanFilter3, KalmanFilter4
+from .kalman import KalmanFilter3, KalmanFilter4
 from .h_interpolator import HInterpolator
 
 
@@ -19,9 +19,7 @@ class ControlMPCChamber:
     """Klipper heater control implementation for chamber MPC.
 
     Supports four control modes built from two config parameters:
-        basic+fixed:    2-state model, constant smoothing correction
         basic+kalman:   2-state model, Kalman filter correction
-        advanced+fixed: 4-state model, per-pair smoothing correction
         advanced+kalman: 4-state model, Kalman filter correction
     """
 
@@ -46,7 +44,6 @@ class ControlMPCChamber:
     def _build_model(self, profile, heater, load_clean):
         """Build the appropriate model+estimator from profile."""
         model_type = profile.get('model_type', 'basic')
-        estimator_type = profile.get('estimator_type', 'fixed')
         heater_power = profile.get('heater_power', 0)
 
         # Build h interpolator
@@ -58,10 +55,10 @@ class ControlMPCChamber:
 
         # Common parameters
         chamber_heat_capacity = profile.get('chamber_heat_capacity')
-        sensor_responsiveness = profile.get('sensor_responsiveness')
+        s1_responsiveness = profile.get('s1_responsiveness')
         target_reach_time = profile.get('target_reach_time', 2.0)
 
-        if not chamber_heat_capacity or not sensor_responsiveness:
+        if not chamber_heat_capacity or not s1_responsiveness:
             self.model = None
             self._valid = False
             return
@@ -76,17 +73,17 @@ class ControlMPCChamber:
         # Store config names for deferred lookup
         self._bed_heater_name = profile.get('bed_heater')
         self._bed_transfer = profile.get('bed_transfer', 0.0)
-        self._heating_element_sensor_name = profile.get(
-            'heating_element_sensor')
-        self._heating_element_max_temp = profile.get(
-            'heating_element_max_temp', 250.0)
-        self._heating_element_margin = profile.get(
-            'heating_element_margin', 20.0)
+        self._secondary_sensor_name = profile.get(
+            'secondary_sensor')
+        self._s2_safe_temp = profile.get(
+            's2_safe_temp', 250.0)
+        self._s2_safe_temp_zone = profile.get(
+            's2_safe_temp_zone', 20.0)
         self._ambient_sensor_name = profile.get('ambient_temp_sensor')
 
     def _build_h_interpolator(self, profile):
         """Build HInterpolator from profile parameters."""
-        h_raw = profile.get('h_calibration_points')
+        h_raw = profile.get('ambient_transfer_points')
         ambient_transfer = profile.get('ambient_transfer')
 
         if h_raw is not None:
@@ -100,29 +97,24 @@ class ControlMPCChamber:
         return None
 
     def _build_basic_model(self, profile, h_interp, heater, load_clean):
-        """Build 2-state basic model with fixed or Kalman estimator."""
-        estimator_type = profile.get('estimator_type', 'fixed')
-        kalman = None
-
-        if estimator_type == 'kalman':
-            kalman = KalmanFilter3(
-                process_noise_chamber=profile.get(
-                    'process_noise_chamber', 1.0),
-                process_noise_sensor=profile.get(
-                    'process_noise_sensor', 0.1),
-                process_noise_disturbance=25.0,
-                measurement_noise=profile.get(
-                    'measurement_noise', 0.5),
-            )
+        """Build 2-state basic model with Kalman estimator."""
+        kalman = KalmanFilter3(
+            process_noise_chamber=profile.get(
+                'process_noise_chamber', 1.0),
+            process_noise_s1=profile.get(
+                'process_noise_s1', 0.1),
+            process_noise_disturbance=profile.get(
+                'process_noise_disturbance', 10.0),
+            measurement_noise=profile.get(
+                'measurement_noise_s1', 0.5),
+        )
 
         self.model = ThermalModel(
             chamber_heat_capacity=profile.get('chamber_heat_capacity'),
-            sensor_responsiveness=profile.get('sensor_responsiveness'),
+            s1_responsiveness=profile.get('s1_responsiveness'),
             h_interpolator=h_interp,
             heater_power=profile.get('heater_power'),
-            smoothing=profile.get('smoothing', 0.5),
             target_reach_time=profile.get('target_reach_time', 2.0),
-            estimator_type=estimator_type,
             kalman_filter=kalman,
         )
 
@@ -134,22 +126,19 @@ class ControlMPCChamber:
         self._valid = True
 
     def _build_advanced_model(self, profile, h_interp, heater, load_clean):
-        """Build 4-state advanced model with fixed or Kalman estimator."""
-        estimator_type = profile.get('estimator_type', 'fixed')
+        """Build 4-state advanced model with Kalman estimator."""
 
         heater_heat_capacity = profile.get('heater_heat_capacity')
-        heater_chamber_coupling = profile.get('heater_chamber_coupling')
+        heating_element_transfer = profile.get('heating_element_transfer')
         s1_responsiveness = profile.get('s1_responsiveness')
 
-        if (not heater_heat_capacity or not heater_chamber_coupling
+        if (not heater_heat_capacity or not heating_element_transfer
                 or not s1_responsiveness):
             self.model = None
             self._valid = False
             return
 
-        kalman = None
-        if estimator_type == 'kalman':
-            kalman = KalmanFilter4(
+        kalman = KalmanFilter4(
                 process_noise_heater=profile.get(
                     'process_noise_heater', 1.0),
                 process_noise_chamber=profile.get(
@@ -162,30 +151,17 @@ class ControlMPCChamber:
                     'measurement_noise_s1', 0.5),
                 measurement_noise_s2=profile.get(
                     'measurement_noise_s2', 0.5),
-            )
-
-        # Smoothing for advanced+fixed: use explicit values if provided,
-        # otherwise derive from base smoothing
-        smoothing_heater = profile.get('smoothing_heater')
-        smoothing_chamber = profile.get('smoothing_chamber')
-        base_smoothing = profile.get('smoothing', 0.5)
-        if smoothing_heater is None:
-            smoothing_heater = min(0.95, base_smoothing * 1.4)
-        if smoothing_chamber is None:
-            smoothing_chamber = base_smoothing
+        )
 
         self.model = ThermalModelAdvanced(
             heater_heat_capacity=heater_heat_capacity,
             chamber_heat_capacity=profile.get('chamber_heat_capacity'),
-            heater_chamber_coupling=heater_chamber_coupling,
+            heating_element_transfer=heating_element_transfer,
             s1_responsiveness=s1_responsiveness,
-            s2_responsiveness=profile.get('sensor_responsiveness'),
+            s2_responsiveness=profile.get('s2_responsiveness'),
             h_interpolator=h_interp,
             heater_power=profile.get('heater_power'),
-            smoothing_heater=smoothing_heater,
-            smoothing_chamber=smoothing_chamber,
             target_reach_time=profile.get('target_reach_time', 2.0),
-            estimator_type=estimator_type,
             kalman_filter=kalman,
         )
 
@@ -220,41 +196,41 @@ class ControlMPCChamber:
                     self._bed_heater_name, e)
 
         # Heating element sensor
-        if self._heating_element_sensor_name:
+        if self._secondary_sensor_name:
             try:
                 sensor = printer.lookup_object(
                     'temperature_sensor %s' %
-                    self._heating_element_sensor_name)
+                    self._secondary_sensor_name)
 
                 if is_advanced:
                     # Advanced model: S1 sensor for state observation
                     self.model.set_s1_sensor(sensor.get_temp)
-                    self.model.set_heating_element_limit(
+                    self.model.set_secondary_sensor_limit(
                         sensor.get_temp,
-                        self._heating_element_max_temp,
-                        self._heating_element_margin)
+                        self._s2_safe_temp,
+                        self._s2_safe_temp_zone)
                     self.log.info(
                         "Heating element sensor (S1) enabled: %s "
                         "(model-integrated limit, max=%.0f, margin=%.0f)",
-                        self._heating_element_sensor_name,
-                        self._heating_element_max_temp,
-                        self._heating_element_margin)
+                        self._secondary_sensor_name,
+                        self._s2_safe_temp,
+                        self._s2_safe_temp_zone)
                 else:
                     # Basic model: external clamp
-                    self.model.set_heating_element_limit(
+                    self.model.set_secondary_sensor_limit(
                         sensor.get_temp,
-                        self._heating_element_max_temp,
-                        self._heating_element_margin)
+                        self._s2_safe_temp,
+                        self._s2_safe_temp_zone)
                     self.log.info(
-                        "Heating element limit enabled: %s "
+                        "Secondary sensor limit enabled: %s "
                         "(external clamp, max=%.0f, margin=%.0f)",
-                        self._heating_element_sensor_name,
-                        self._heating_element_max_temp,
-                        self._heating_element_margin)
+                        self._secondary_sensor_name,
+                        self._s2_safe_temp,
+                        self._s2_safe_temp_zone)
             except Exception as e:
                 self.log.warning(
-                    "Could not set up heating element sensor '%s': %s",
-                    self._heating_element_sensor_name, e)
+                    "Could not set up secondary sensor sensor '%s': %s",
+                    self._secondary_sensor_name, e)
 
         # Ambient temperature sensor
         if self._ambient_sensor_name:
@@ -353,7 +329,7 @@ class ControlMPCChamber:
                 "chamber=%.1f deg C, sensor=%.1f deg C, "
                 "ambient=%.1f deg C, power=%.1f W, "
                 "avg_power=%.1f W (%.0f%%)%s%s"
-                % (status['temp_chamber'], status['temp_sensor'],
+                % (status['temp_chamber'], status['temp_s1'],
                    status['temp_ambient'], status['power'],
                    status['avg_power'], status['avg_duty'] * 100,
                    d_str, k_str))
