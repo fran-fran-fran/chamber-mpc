@@ -20,6 +20,8 @@
 
 import logging
 
+SETTLE_TIMEOUT_S = 600.0  # 10 minutes max wait for steady state
+
 from .calibrate import (
     StepResponseAnalyzer, CalibrationResult,
     estimate_h_from_cooling,
@@ -252,14 +254,23 @@ class MpcChamberCalibrateRunner:
 
             # Wait for temperature to settle (with periodic status)
             gcmd.respond_info("    Waiting for steady state...")
-            self._wait_settle_with_status(target, model, gcmd)
+            settled, actual_temp = self._wait_settle_with_status(
+                target, model, gcmd)
+
+            if not settled:
+                gcmd.respond_info(
+                    "    WARNING: Timed out after %.0f s. "
+                    "Using actual temperature %.1f\u00b0C instead of "
+                    "target %.1f\u00b0C"
+                    % (SETTLE_TIMEOUT_S, actual_temp, target))
+                target = round(actual_temp, 1)
 
             # Measure steady-state power
             gcmd.respond_info("    Measuring steady-state power...")
             avg_duty = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
             avg_power_watts = avg_duty * heater_power
 
-            # Compute h at this temperature
+            # Compute h at actual hold temperature
             delta_T = target - result.t_ambient
             if delta_T <= 0:
                 raise self.printer.command_error(
@@ -267,7 +278,7 @@ class MpcChamberCalibrateRunner:
                     % (target, result.t_ambient))
             h = avg_power_watts / delta_T
             result.h_points.append((target, h))
-            gcmd.respond_info("    h = %.4f W/K" % h)
+            gcmd.respond_info("    h(%.1f) = %.4f W/K" % (target, h))
 
             # Swap back to tuning control between points
             # (MPC will be rebuilt with updated h points for next target)
@@ -554,12 +565,29 @@ class MpcChamberCalibrateRunner:
         self.printer.wait_while(process)
 
     def _wait_settle_with_status(self, target, model, gcmd):
-        """Wait for temperature to settle, printing MPC status every 60s."""
+        """Wait for temperature to settle, printing MPC status every 60s.
+
+        Returns:
+            (settled, actual_temp): settled is True if target was reached
+            within tolerance, False if timed out. actual_temp is the
+            temperature at which the system stabilized.
+        """
         stable_since = [None]
         last_status_time = [None]
+        start_time = [None]
+        last_temp = [None]
+        timed_out = [False]
 
         def process(eventtime):
             temp, _ = self.heater.get_temp(eventtime)
+            last_temp[0] = temp
+
+            # Check timeout
+            if start_time[0] is None:
+                start_time[0] = eventtime
+            elif eventtime - start_time[0] > SETTLE_TIMEOUT_S:
+                timed_out[0] = True
+                return False
 
             # Print status every 60 seconds
             if last_status_time[0] is None:
@@ -595,6 +623,7 @@ class MpcChamberCalibrateRunner:
             return True
 
         self.printer.wait_while(process)
+        return (not timed_out[0], last_temp[0])
 
     def _save_results(self, gcmd, result):
         """Save calibration results to config and report to user."""
