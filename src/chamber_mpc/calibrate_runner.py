@@ -27,7 +27,7 @@ from .calibrate import (
     estimate_h_from_cooling,
     compute_cooling_rates, format_calibration_report,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
-    STEP_RESPONSE_POWER,
+    STEP_RESPONSE_POWER, BED_COOLDOWN_TOLERANCE_C,
 )
 from .h_interpolator import HInterpolator
 from .kalman import KalmanFilter3
@@ -127,6 +127,7 @@ class MpcChamberCalibrateRunner:
         self.heater = heater
         self.orig_control = orig_control
         self.log = logging.getLogger('chamber_mpc.calibrate')
+        self._bed_heater = None
 
     def run(self, gcmd):
         """Main calibration entry point, called from GCode command."""
@@ -162,11 +163,17 @@ class MpcChamberCalibrateRunner:
             # Always restore original control and turn off heater
             self.heater.set_control(old_control)
             self.heater.set_temp(0.0)
+            if self._bed_heater is not None:
+                self._bed_heater.set_temp(0.0)
 
     def _run_calibration(self, gcmd, tuning, points, bed_temp,
                          t_ambient_override=None, initial_h=1.0):
         """Execute the calibration sequence."""
         result = CalibrationResult()
+
+        # The bed heater must be off before measuring ambient, step response,
+        # or h(T): any residual bed heat biases all of those measurements.
+        self._ensure_bed_is_cold()
 
         # Get heater power from config
         heater_power = 0
@@ -534,8 +541,39 @@ class MpcChamberCalibrateRunner:
 
         return delta_power / delta_T
 
+    def _ensure_bed_is_cold(self):
+        """Turn off the bed and abort if it is too hot to calibrate.
+
+        The bed is turned off before the check so the user can start the
+        cool-down immediately. If it is still significantly warmer than the
+        chamber, abort instead of waiting: the user should let it cool and
+        then rerun the calibration.
+        """
+        bed_name = None
+        if self.orig_control.profile:
+            bed_name = self.orig_control.profile.get('bed_heater')
+        if not bed_name:
+            return
+
+        bed_heater = self._get_bed_heater()
+        bed_heater.set_temp(0.0)
+
+        eventtime = self.heater.reactor.monotonic()
+        bed_temp, _ = bed_heater.get_temp(eventtime)
+        chamber_temp, _ = self.heater.get_temp(eventtime)
+        if bed_temp > chamber_temp + BED_COOLDOWN_TOLERANCE_C:
+            raise self.printer.command_error(
+                "Bed heater '%s' is still hot (T_bed=%.1f deg C, "
+                "T_chamber=%.1f deg C). The bed has been turned off. "
+                "Wait for it to cool within %.1f deg C of the chamber, "
+                "then run calibration again."
+                % (bed_name, bed_temp, chamber_temp,
+                   BED_COOLDOWN_TOLERANCE_C))
+
     def _get_bed_heater(self):
         """Look up the bed heater object."""
+        if self._bed_heater is not None:
+            return self._bed_heater
         bed_name = None
         if self.orig_control.profile:
             bed_name = self.orig_control.profile.get('bed_heater')
@@ -543,7 +581,8 @@ class MpcChamberCalibrateRunner:
             raise self.printer.command_error(
                 "bed_heater not configured in [chamber_mpc]")
         pheaters = self.printer.lookup_object('heaters')
-        return pheaters.lookup_heater(bed_name)
+        self._bed_heater = pheaters.lookup_heater(bed_name)
+        return self._bed_heater
 
     # -- Shared utilities --
 
