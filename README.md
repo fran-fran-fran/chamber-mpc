@@ -113,9 +113,9 @@ MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=90 T_AMBIENT=25
 
 Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to printer.cfg.
 
-For large or well-insulated chambers, increase `SETTLE_TIMEOUT` (chamber
-settling) and `BED_TIMEOUT` (bed reaching its target) if the defaults are too
-short.
+For large or well-insulated chambers, increase `SETTLE_TIMEOUT` (default `1800` s,
+used for chamber ramp/cool/settle phases) and `BED_TIMEOUT` (default `3600` s,
+for the bed reaching its target) if the defaults are too short.
 
 ## GCode command reference
 
