@@ -24,7 +24,8 @@ import logging
 
 from .calibrate import (
     StepResponseAnalyzer, CalibrationResult,
-    estimate_h_from_cooling,
+    estimate_h_from_cooling, estimate_measurement_noise,
+    estimate_target_reach_time,
     compute_cooling_rates, format_calibration_report,
     SETTLE_TOLERANCE_C, SETTLE_DURATION_S, SETTLE_TIMEOUT_S,
     POWER_MEASURE_WINDOW_S, STEP_RESPONSE_POWER,
@@ -38,8 +39,9 @@ from .thermal_model import ThermalModel
 class TuningControl:
     """Temporary heater control for open-loop calibration phases.
 
-    Applies a fixed PWM output and optionally logs temperature readings.
-    Used during ambient measurement (output=0) and step response (output=1).
+    Applies a fixed PWM output (capped by heater.max_power and optional
+    secondary-sensor limiting) and optionally logs temperature readings.
+    Used during ambient measurement (output=0) and step response.
     """
 
     def __init__(self, heater):
@@ -47,12 +49,47 @@ class TuningControl:
         self.value = 0.0
         self.target = 0.0
         self.log = []
+        self.unthrottled_log = []
+        self.duty_log = []
+        self.was_limited = False
         self.logging = False
+        self._secondary_sensor_fn = None
+        self.s2_safe_temp = 250.0
+        self.s2_safe_temp_zone = 20.0
+
+    def set_secondary_sensor_limit(self, temp_fn, max_temp, margin):
+        """Attach optional secondary-sensor temperature limiting."""
+        self._secondary_sensor_fn = temp_fn
+        self.s2_safe_temp = float(max_temp)
+        self.s2_safe_temp_zone = float(margin)
+
+    def _constrain_output(self, read_time, u_desired):
+        u_actual = max(0.0, min(self.heater.max_power, u_desired))
+        if self._secondary_sensor_fn is None or u_actual <= 0.0:
+            return u_actual
+        try:
+            temp_s2, _ = self._secondary_sensor_fn(read_time)
+        except Exception:
+            return u_actual
+        if temp_s2 >= self.s2_safe_temp:
+            return 0.0
+        pullback_start = self.s2_safe_temp - self.s2_safe_temp_zone
+        if self.s2_safe_temp_zone > 0.0 and temp_s2 > pullback_start:
+            headroom = self.s2_safe_temp - temp_s2
+            return u_actual * (headroom / self.s2_safe_temp_zone)
+        return u_actual
 
     def temperature_update(self, read_time, temp, target_temp):
+        u_desired = max(0.0, min(self.heater.max_power, self.value))
+        u_actual = self._constrain_output(read_time, u_desired)
         if self.logging:
+            if u_actual < u_desired - 1e-9:
+                self.was_limited = True
             self.log.append((read_time, temp))
-        self.heater.set_pwm(read_time, self.value)
+            self.duty_log.append(u_actual)
+            if not self.was_limited:
+                self.unthrottled_log.append((read_time, temp))
+        self.heater.set_pwm(read_time, u_actual)
 
     def check_busy(self, eventtime, smoothed_temp, target_temp):
         return self.value != 0.0 or self.target != 0.0
@@ -150,6 +187,11 @@ class MpcChamberCalibrateRunner:
         if not points:
             raise gcmd.error("POINTS must specify at least one temperature")
 
+        if len(set(points)) != len(points):
+            raise gcmd.error(
+                "POINTS contains duplicate temperatures (%s); "
+                "each calibration point must be unique" % points_str)
+
         for p in points:
             if p < 30 or p > self.heater.max_temp - 10:
                 raise gcmd.error(
@@ -192,7 +234,7 @@ class MpcChamberCalibrateRunner:
                 "heater_power must be configured in [chamber_mpc] "
                 "for calibration")
 
-        # Phase 0: ambient temperature
+        # Phase 0: ambient temperature & S1 sensor noise measurement
         tuning.set_output(0.0, 0.0)
         if t_ambient_override is not None:
             result.t_ambient = t_ambient_override
@@ -201,27 +243,37 @@ class MpcChamberCalibrateRunner:
                 % result.t_ambient)
             gcmd.respond_info(
                 "  Waiting for temperature to stabilize...")
-            self._wait_for_stable_temperature()
+            _, idle_samples = self._wait_for_stable_temperature()
         else:
             gcmd.respond_info("Phase 0: Measuring ambient temperature...")
-            result.t_ambient = self._wait_for_stable_temperature()
+            result.t_ambient, idle_samples = (
+                self._wait_for_stable_temperature())
             gcmd.respond_info(
                 "  T_ambient = %.1f\u00b0C" % result.t_ambient)
+        result.suggested_measurement_noise_s1 = estimate_measurement_noise(
+            idle_samples)
 
         # Phase 1: step response from ambient to first point
+        self._attach_secondary_sensor(tuning)
         gcmd.respond_info(
             "Phase 1: Step response to %.0f\u00b0C..." % points[0])
-        step_data = self._run_step_response(tuning, points[0])
+        step_data, step_power = self._run_step_response(
+            tuning, points[0], heater_power, settle_timeout, gcmd)
         analyzer = StepResponseAnalyzer(
-            step_data, heater_power, result.t_ambient)
+            step_data, step_power, result.t_ambient)
         step_result = analyzer.analyze()
         result.chamber_heat_capacity = step_result['chamber_heat_capacity']
         result.s1_responsiveness = step_result['s1_responsiveness']
+        effective_max_power = heater_power * min(
+            STEP_RESPONSE_POWER, self.heater.max_power)
+        result.target_reach_time = estimate_target_reach_time(
+            result.chamber_heat_capacity, effective_max_power)
 
         gcmd.respond_info(
-            "  C = %.1f J/K, s1_resp = %.4f"
+            "  C = %.1f J/K, s1_resp = %.4f, target_reach_time = %.1f s"
             % (result.chamber_heat_capacity,
-               result.s1_responsiveness))
+               result.s1_responsiveness,
+               result.target_reach_time))
 
         # Phase 1b: estimate rough h from passive cooling
         if initial_h is not None:
@@ -232,7 +284,7 @@ class MpcChamberCalibrateRunner:
             gcmd.respond_info(
                 "Phase 1b: Passive cooling to estimate rough h...")
             cooling_data = self._record_cooling(
-                tuning, points[0], gcmd)
+                tuning, points[0], gcmd, timeout_s=settle_timeout)
             rough_h = estimate_h_from_cooling(
                 cooling_data, result.chamber_heat_capacity,
                 result.t_ambient, center_temp=points[0])
@@ -339,12 +391,17 @@ class MpcChamberCalibrateRunner:
             measurement_noise_s1=self.profile.get(
                 'measurement_noise_s1', 0.5),
         )
+        reach_time = (
+            result.target_reach_time
+            if result.target_reach_time is not None
+            else self.profile.get('target_reach_time', 2.0)
+        )
         model = ThermalModel(
             chamber_heat_capacity=result.chamber_heat_capacity,
             s1_responsiveness=result.s1_responsiveness,
             h_interpolator=HInterpolator(h_points),
             heater_power=heater_power,
-            target_reach_time=self.profile.get('target_reach_time', 2.0),
+            target_reach_time=reach_time,
             kalman_filter=kalman,
         )
         current_temp, _ = self.heater.get_temp(
@@ -374,7 +431,7 @@ class MpcChamberCalibrateRunner:
     # -- Phase 0: Ambient measurement --
 
     def _wait_for_stable_temperature(self):
-        """Wait for a slow temperature rate and return the last reading."""
+        """Wait for a slow temperature rate and return (last_temp, samples)."""
         samples = []
 
         def process(eventtime):
@@ -392,18 +449,36 @@ class MpcChamberCalibrateRunner:
             return rate > 0.05
 
         self.printer.wait_while(process)
-        return samples[-1][1]
+        return (samples[-1][1], list(samples))
 
     # -- Phase 1: Step response --
 
-    def _run_step_response(self, tuning, target):
-        """Apply full power and record temperature trajectory."""
-        tuning.logging = True
+    def _run_step_response(self, tuning, target, heater_power,
+                           timeout_s=SETTLE_TIMEOUT_S, gcmd=None):
+        """Apply step power (capped by max_power and secondary sensor) and record trajectory.
+
+        Returns (samples, effective_power_watts) for StepResponseAnalyzer.
+        """
+        step_duty = min(STEP_RESPONSE_POWER, self.heater.max_power)
         tuning.log = []
-        tuning.set_output(STEP_RESPONSE_POWER, target)
+        tuning.unthrottled_log = []
+        tuning.duty_log = []
+        tuning.was_limited = False
+        tuning.logging = True
+        tuning.set_output(step_duty, target)
+
+        start_time = [None]
+        timed_out = [False]
+        last_temp = [None]
 
         def process(eventtime):
             temp, _ = self.heater.get_temp(eventtime)
+            last_temp[0] = temp
+            if start_time[0] is None:
+                start_time[0] = eventtime
+            elif eventtime - start_time[0] > timeout_s:
+                timed_out[0] = True
+                return False
             return temp < target
 
         self.printer.wait_while(process)
@@ -411,10 +486,43 @@ class MpcChamberCalibrateRunner:
         tuning.set_output(0.0, 0.0)
 
         log = list(tuning.log)
+        unthrottled = list(tuning.unthrottled_log)
+        duties = list(tuning.duty_log)
+        was_limited = tuning.was_limited
         tuning.log = []
-        return log
+        tuning.unthrottled_log = []
+        tuning.duty_log = []
 
-    def _record_cooling(self, tuning, target, gcmd):
+        if timed_out[0]:
+            raise self.printer.command_error(
+                "Chamber did not reach %.1f deg C during step response "
+                "within %.0f s (last temperature %.1f deg C). Increase "
+                "SETTLE_TIMEOUT or check the heater / secondary sensor."
+                % (target, timeout_s,
+                   last_temp[0] if last_temp[0] is not None else 0.0))
+
+        effective_power = heater_power * step_duty
+        if was_limited:
+            if (len(unthrottled) >= 10 and
+                    unthrottled[-1][1] - unthrottled[0][1] >= 5.0):
+                if gcmd is not None:
+                    gcmd.respond_info(
+                        "  Secondary sensor limited power late in Phase 1; "
+                        "analyzing unthrottled prefix (%d samples)."
+                        % len(unthrottled))
+                return (unthrottled, effective_power)
+            avg_duty = sum(duties) / len(duties) if duties else step_duty
+            effective_power = heater_power * avg_duty
+            if gcmd is not None:
+                gcmd.respond_info(
+                    "  WARNING: Secondary sensor limited power early in "
+                    "Phase 1 (avg duty %.0f%%); C estimate may be less "
+                    "accurate." % (avg_duty * 100.0))
+
+        return (log, effective_power)
+
+    def _record_cooling(self, tuning, target, gcmd,
+                        timeout_s=SETTLE_TIMEOUT_S):
         """Record passive cooling data after step response overshoot.
 
         After the step response, the heater is off and the system
@@ -426,6 +534,8 @@ class MpcChamberCalibrateRunner:
             tuning: TuningControl (heater off)
             target: first calibration target temperature
             gcmd: GCode command for status messages
+            timeout_s: maximum time to wait for cooling before returning
+                       whatever samples were collected
 
         Returns:
             list of (time, temperature) tuples during cooling
@@ -435,16 +545,24 @@ class MpcChamberCalibrateRunner:
         t_high = target + 5.0  # start recording 5 deg C above target
         t_low = target - 5.0   # stop recording 5 deg C below target
         peak_seen = [False]
-        last_temp = [None]
+        peak_temp = [None]
+        start_time = [None]
+        timed_out = [False]
 
         def process(eventtime):
             temp, _ = self.heater.get_temp(eventtime)
 
-            # Detect peak (temperature starts falling)
-            if last_temp[0] is not None:
-                if temp < last_temp[0] - 0.2:
-                    peak_seen[0] = True
-            last_temp[0] = temp
+            if start_time[0] is None:
+                start_time[0] = eventtime
+            elif eventtime - start_time[0] > timeout_s:
+                timed_out[0] = True
+                return False
+
+            # Detect peak (temperature drops 0.2 deg C below highest seen)
+            if peak_temp[0] is None or temp > peak_temp[0]:
+                peak_temp[0] = temp
+            elif temp < peak_temp[0] - 0.2:
+                peak_seen[0] = True
 
             if not peak_seen[0]:
                 return True  # still waiting for peak
@@ -461,8 +579,13 @@ class MpcChamberCalibrateRunner:
 
         self.printer.wait_while(process)
 
-        gcmd.respond_info(
-            "  Collected %d cooling samples" % len(cooling_samples))
+        if timed_out[0]:
+            gcmd.respond_info(
+                "  Cooling phase timed out after %.0f s "
+                "(collected %d samples)" % (timeout_s, len(cooling_samples)))
+        else:
+            gcmd.respond_info(
+                "  Collected %d cooling samples" % len(cooling_samples))
         return cooling_samples
 
     # -- Phase 2: Steady-state measurement utilities --
@@ -595,7 +718,14 @@ class MpcChamberCalibrateRunner:
                 "Bed temperature too close to chamber temperature "
                 "for accurate h_bed measurement")
 
-        return delta_power / delta_T
+        h_bed = delta_power / delta_T
+        if h_bed <= 0.0:
+            raise self.printer.command_error(
+                "Measured non-positive bed_transfer (%.4f W/K: "
+                "P_no_bed=%.1f W, P_with_bed=%.1f W); skipping"
+                % (h_bed, power_no_bed_watts, power_with_bed_watts))
+
+        return h_bed
 
     def _ensure_bed_is_cold(self):
         """Turn off the bed and abort if it is too hot to calibrate.
@@ -722,6 +852,10 @@ class MpcChamberCalibrateRunner:
         configfile.set(
             cfgname, 'ambient_temp',
             "%.1f" % result.t_ambient)
+        if result.target_reach_time is not None:
+            configfile.set(
+                cfgname, 'target_reach_time',
+                "%.1f" % result.target_reach_time)
 
         # h calibration points
         h_interp = HInterpolator(result.h_points)

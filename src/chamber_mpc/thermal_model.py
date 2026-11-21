@@ -208,7 +208,11 @@ class ThermalModel:
             self.state_chamber_temp += corrections[0]
             self.state_s1_temp += corrections[1]
             if len(corrections) > 2:
-                self.state_disturbance += corrections[2]
+                self.state_disturbance = max(
+                    -self.heater_power,
+                    min(self.heater_power,
+                        self.state_disturbance + corrections[2]),
+                )
 
     def _update_ambient(self, dt, read_time):
         """Update ambient temperature estimate.
@@ -292,7 +296,7 @@ class ThermalModel:
         pullback_start = (
             self.s2_safe_temp - self.s2_safe_temp_zone
         )
-        if temp_s2 > pullback_start:
+        if self.s2_safe_temp_zone > 0.0 and temp_s2 > pullback_start:
             headroom = self.s2_safe_temp - temp_s2
             scale = headroom / self.s2_safe_temp_zone
             return u_desired * scale

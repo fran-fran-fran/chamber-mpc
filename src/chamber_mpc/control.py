@@ -155,7 +155,7 @@ class ControlMPCChamber:
                     self._s2_safe_temp_zone)
             except Exception as e:
                 self.log.warning(
-                    "Could not set up secondary sensor sensor '%s': %s",
+                    "Could not set up secondary sensor '%s': %s",
                     self._secondary_sensor_name, e)
 
         # Ambient temperature sensor

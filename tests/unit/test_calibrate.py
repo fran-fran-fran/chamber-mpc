@@ -147,6 +147,66 @@ class TestFormatting:
         assert "N/A" not in text
         assert "deg C/min" in text
 
+    def test_report_includes_suggested_measurement_noise(self):
+        result = CalibrationResult()
+        result.chamber_heat_capacity = 360.0
+        result.s1_responsiveness = 0.08
+        result.h_points = [(100.0, 0.15)]
+        result.t_ambient = 22.0
+        result.target_reach_time = 20.0
+        result.suggested_measurement_noise_s1 = 0.0123
+        rates = compute_cooling_rates(
+            result.h_points, result.chamber_heat_capacity, result.t_ambient)
+        report = format_calibration_report(result, rates)
+        text = "\n".join(report)
+        assert "target_reach_time = 20.0 s" in text
+        assert "measurement_noise_s1: 0.0123" in text
+        assert "not auto-saved" in text
+
+
+class TestEstimateTargetReachTime:
+    def test_airfryer_clamped_to_floor(self):
+        from chamber_mpc.calibrate import estimate_target_reach_time
+        # 5.0 * 500 / 1800 = 1.39 -> clamped to 2.0
+        assert estimate_target_reach_time(500.0, 1800.0) == pytest.approx(2.0)
+
+    def test_printer_chamber_scaled(self):
+        from chamber_mpc.calibrate import estimate_target_reach_time
+        # 5.0 * 2000 / 500 = 20.0
+        assert estimate_target_reach_time(2000.0, 500.0) == pytest.approx(20.0)
+
+    def test_large_chamber_clamped_to_ceiling(self):
+        from chamber_mpc.calibrate import estimate_target_reach_time
+        # 5.0 * 10000 / 300 = 166.7 -> clamped to 60.0
+        assert estimate_target_reach_time(10000.0, 300.0) == pytest.approx(60.0)
+
+    def test_invalid_inputs_return_floor(self):
+        from chamber_mpc.calibrate import estimate_target_reach_time
+        assert estimate_target_reach_time(0.0, 500.0) == pytest.approx(2.0)
+        assert estimate_target_reach_time(500.0, 0.0) == pytest.approx(2.0)
+
+
+class TestEstimateMeasurementNoise:
+    def test_estimates_variance_ignoring_linear_drift(self):
+        from chamber_mpc.calibrate import estimate_measurement_noise
+        # Alternating +-0.1 C noise around a 0.02 C/s linear drift -> var ~ 0.01
+        samples = [
+            (i * 0.5, 25.0 + 0.02 * (i * 0.5) + (0.1 if i % 2 == 0 else -0.1))
+            for i in range(60)
+        ]
+        var = estimate_measurement_noise(samples)
+        assert var == pytest.approx(0.01, rel=0.1)
+
+    def test_clamps_noiseless_signal_to_floor(self):
+        from chamber_mpc.calibrate import estimate_measurement_noise
+        samples = [(i * 0.5, 25.0) for i in range(30)]
+        var = estimate_measurement_noise(samples, min_variance=1e-4)
+        assert var == pytest.approx(1e-4)
+
+    def test_returns_none_with_too_few_samples(self):
+        from chamber_mpc.calibrate import estimate_measurement_noise
+        assert estimate_measurement_noise([(0.0, 25.0), (1.0, 25.1)]) is None
+
 
 class TestMeasureSteadyState:
     def test_measures_avg_power_and_temp(self):
@@ -180,6 +240,214 @@ class TestMeasureSteadyState:
         avg_duty, avg_temp = runner._measure_steady_state(9.0)
         assert avg_duty == pytest.approx(0.5)
         assert avg_temp == pytest.approx(70.0)
+
+
+class TestTuningControlPhase1:
+    def test_respects_max_power_and_secondary_sensor_limit(self):
+        from chamber_mpc.calibrate_runner import TuningControl
+
+        class DummyHeater:
+            max_power = 0.6
+
+            def __init__(self):
+                self.pwms = []
+
+            def set_pwm(self, read_time, value):
+                self.pwms.append(value)
+
+            def set_temp(self, target):
+                pass
+
+        heater = DummyHeater()
+        tuning = TuningControl(heater)
+        s2_temp = [90.0]
+        tuning.set_secondary_sensor_limit(
+            lambda _t: (s2_temp[0], 0.0), max_temp=120.0, margin=20.0)
+        tuning.logging = True
+        tuning.set_output(1.0, 70.0)
+
+        # Below pullback zone: capped to heater.max_power (0.6), not limited by s2
+        tuning.temperature_update(1.0, 30.0, 70.0)
+        assert heater.pwms[-1] == pytest.approx(0.6)
+        assert tuning.was_limited is False
+        assert len(tuning.unthrottled_log) == 1
+
+        # Halfway into pullback zone (110 C -> scale 0.5 of 0.6 = 0.3)
+        s2_temp[0] = 110.0
+        tuning.temperature_update(2.0, 40.0, 70.0)
+        assert heater.pwms[-1] == pytest.approx(0.3)
+        assert tuning.was_limited is True
+        assert len(tuning.unthrottled_log) == 1
+        assert len(tuning.log) == 2
+
+        # At or above safe temp (120 C -> 0.0)
+        s2_temp[0] = 120.0
+        tuning.temperature_update(3.0, 45.0, 70.0)
+        assert heater.pwms[-1] == pytest.approx(0.0)
+
+    def test_step_response_uses_max_power_and_times_out(self):
+        from chamber_mpc.calibrate_runner import (
+            MpcChamberCalibrateRunner, TuningControl,
+        )
+
+        class DummyError(Exception):
+            pass
+
+        class DummyPrinter:
+            command_error = DummyError
+
+            def wait_while(self, fn):
+                t = 0.0
+                while fn(t):
+                    t += 10.0
+
+        class DummyHeater:
+            max_power = 0.5
+
+            def __init__(self, rate):
+                self.rate = rate
+                self.last_pwm = 0.0
+
+            def get_temp(self, t):
+                return (25.0 + self.rate * t, 70.0)
+
+            def set_pwm(self, t, val):
+                self.last_pwm = val
+
+            def set_temp(self, target):
+                pass
+
+        class DummyControl:
+            profile = {}
+
+        # Normal completion: effective power is heater_power * max_power
+        heater = DummyHeater(rate=1.0)
+        runner = MpcChamberCalibrateRunner(
+            DummyPrinter(), heater, DummyControl())
+        tuning = TuningControl(heater)
+        _, eff_power = runner._run_step_response(
+            tuning, target=70.0, heater_power=500.0, timeout_s=100.0)
+        assert eff_power == pytest.approx(250.0)
+
+        # Stuck chamber: raises command_error on timeout
+        stuck_heater = DummyHeater(rate=0.0)
+        runner2 = MpcChamberCalibrateRunner(
+            DummyPrinter(), stuck_heater, DummyControl())
+        tuning2 = TuningControl(stuck_heater)
+        with pytest.raises(DummyError, match="did not reach"):
+            runner2._run_step_response(
+                tuning2, target=70.0, heater_power=500.0, timeout_s=30.0)
+
+
+class TestRecordCoolingAndPointsValidation:
+    def test_record_cooling_detects_slow_peak_and_collects_samples(self):
+        from chamber_mpc.calibrate_runner import (
+            MpcChamberCalibrateRunner, TuningControl,
+        )
+
+        class DummyPrinter:
+            def wait_while(self, fn):
+                t = 0.0
+                while fn(t):
+                    t += 1.0
+
+        class DummyHeater:
+            max_power = 1.0
+
+            def get_temp(self, t):
+                # Slow overshoot (+1 C over 10 s), then slow cooling (0.01 C/s = 0.6 C/min)
+                if t <= 10.0:
+                    return (70.0 + 0.1 * t, 0.0)
+                return (71.0 - 0.01 * (t - 10.0), 0.0)
+
+            def set_temp(self, target):
+                pass
+
+        class DummyGcmd:
+            def __init__(self):
+                self.msgs = []
+
+            def respond_info(self, msg):
+                self.msgs.append(msg)
+
+        class DummyControl:
+            profile = {}
+
+        heater = DummyHeater()
+        runner = MpcChamberCalibrateRunner(
+            DummyPrinter(), heater, DummyControl())
+        tuning = TuningControl(heater)
+        gcmd = DummyGcmd()
+        samples = runner._record_cooling(
+            tuning, target=70.0, gcmd=gcmd, timeout_s=1000.0)
+        assert len(samples) > 100
+        assert samples[-1][1] <= 65.01
+
+    def test_record_cooling_times_out_cleanly(self):
+        from chamber_mpc.calibrate_runner import (
+            MpcChamberCalibrateRunner, TuningControl,
+        )
+
+        class DummyPrinter:
+            def wait_while(self, fn):
+                t = 0.0
+                while fn(t):
+                    t += 5.0
+
+        class DummyHeater:
+            max_power = 1.0
+
+            def get_temp(self, t):
+                return (70.0, 0.0)  # never cools
+
+            def set_temp(self, target):
+                pass
+
+        class DummyGcmd:
+            def __init__(self):
+                self.msgs = []
+
+            def respond_info(self, msg):
+                self.msgs.append(msg)
+
+        class DummyControl:
+            profile = {}
+
+        heater = DummyHeater()
+        runner = MpcChamberCalibrateRunner(
+            DummyPrinter(), heater, DummyControl())
+        tuning = TuningControl(heater)
+        gcmd = DummyGcmd()
+        samples = runner._record_cooling(
+            tuning, target=70.0, gcmd=gcmd, timeout_s=30.0)
+        assert samples == []
+        assert any("timed out" in m for m in gcmd.msgs)
+
+    def test_duplicate_points_rejected_before_heating(self):
+        from chamber_mpc.calibrate_runner import MpcChamberCalibrateRunner
+
+        class DummyGcmdError(Exception):
+            pass
+
+        class DummyGcmd:
+            error = DummyGcmdError
+
+            def get(self, key, default=None):
+                return "70,70" if key == "POINTS" else default
+
+            def get_float(self, key, default=None, above=None):
+                return default
+
+        class DummyHeater:
+            max_temp = 90.0
+
+        class DummyControl:
+            profile = {}
+
+        runner = MpcChamberCalibrateRunner(
+            object(), DummyHeater(), DummyControl())
+        with pytest.raises(DummyGcmdError, match="duplicate"):
+            runner.run(DummyGcmd())
 
 class TestShortStepResponse:
     def test_short_ramp_does_not_crash(self):

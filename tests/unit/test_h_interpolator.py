@@ -58,6 +58,12 @@ class TestMultiPoint:
         pts = interp.points()
         assert pts[0][0] < pts[1][0]
 
+    def test_duplicate_temperature_does_not_divide_by_zero(self):
+        interp = HInterpolator([
+            (60.0, 0.10), (70.0, 0.12), (70.0, 0.15), (100.0, 0.20),
+        ])
+        assert interp.h(70.0) in (0.12, 0.15)
+
 
 class TestPassiveCoolingRate:
     def test_rate_at_calibrated_point(self):

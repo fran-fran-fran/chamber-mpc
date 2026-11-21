@@ -347,3 +347,59 @@ class TestBasicKalmanEstimator:
         assert Tc == pytest.approx(target, abs=0.05)
         assert model.state_disturbance == pytest.approx(expected_d, abs=0.5)
         assert d_min > expected_d - 5.0  # no windup excursion
+
+    def test_disturbance_clamped_to_heater_power(self):
+        """Disturbance state is bounded to [-heater_power, +heater_power]."""
+        # With h=5.0 W/K, holding 200 C at P=0 requires +875 W (> 500 W),
+        # and holding 0 C at P=500 W requires -625 W (< -500 W).
+        model = make_model(h_val=5.0, heater_power=500.0)
+        model.set_initial_state(50.0)
+        model.set_ambient(25.0)
+        t = 0.0
+        for _ in range(5000):
+            t += 0.3
+            model.update(t, 200.0, 50.0, 1.0)
+        assert model.state_disturbance == pytest.approx(500.0)
+
+        for _ in range(5000):
+            t += 0.3
+            model.update(t, 0.0, 50.0, 1.0)
+        assert model.state_disturbance == pytest.approx(-500.0)
+
+
+class TestConfigValidation:
+    def test_s2_safe_temp_not_checked_without_secondary_sensor(self):
+        from chamber_mpc import ChamberMpcModule
+
+        class DummyHeater:
+            max_temp = 260.0
+
+        mod = ChamberMpcModule.__new__(ChamberMpcModule)
+        mod.profile = {
+            'chamber_heat_capacity': 500.0,
+            's1_responsiveness': 0.05,
+            'ambient_transfer_points': '80.0, 3.5',
+            'ambient_transfer': None,
+            'secondary_sensor': None,
+            's2_safe_temp': 250.0,  # <= heater.max_temp, but no s2 configured
+        }
+        assert mod._validate_config(DummyHeater()) == []
+
+    def test_s2_safe_temp_checked_when_secondary_sensor_configured(self):
+        from chamber_mpc import ChamberMpcModule
+
+        class DummyHeater:
+            max_temp = 260.0
+
+        mod = ChamberMpcModule.__new__(ChamberMpcModule)
+        mod.profile = {
+            'chamber_heat_capacity': 500.0,
+            's1_responsiveness': 0.05,
+            'ambient_transfer_points': '80.0, 3.5',
+            'ambient_transfer': None,
+            'secondary_sensor': 'heating_element',
+            's2_safe_temp': 250.0,
+        }
+        issues = mod._validate_config(DummyHeater())
+        assert len(issues) == 1
+        assert "s2_safe_temp" in issues[0]

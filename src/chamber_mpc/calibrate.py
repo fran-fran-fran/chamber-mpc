@@ -21,6 +21,9 @@ POWER_MEASURE_WINDOW_S = 180.0
 STEP_RESPONSE_POWER = 1.0  # full power for step response
 BED_COOLDOWN_TOLERANCE_C = 5.0  # bed must be within this of chamber temp
 BED_HEAT_TIMEOUT_S = 3600.0  # max wait for the bed to reach its target
+TARGET_PROPORTIONAL_BAND_C = 5.0  # target error for 100% proportional power
+MIN_TARGET_REACH_TIME_S = 2.0
+MAX_TARGET_REACH_TIME_S = 60.0
 
 
 class CalibrationResult:
@@ -28,6 +31,7 @@ class CalibrationResult:
     __slots__ = (
         'chamber_heat_capacity', 's1_responsiveness',
         'h_points', 't_ambient', 'bed_transfer',
+        'target_reach_time', 'suggested_measurement_noise_s1',
     )
 
     def __init__(self):
@@ -36,6 +40,8 @@ class CalibrationResult:
         self.h_points = []  # list of (T, h) tuples
         self.t_ambient = 25.0
         self.bed_transfer = None  # None = not calibrated
+        self.target_reach_time = None  # None = not estimated
+        self.suggested_measurement_noise_s1 = None  # None = not measured
 
 
 class StepResponseAnalyzer:
@@ -219,6 +225,55 @@ class StepResponseAnalyzer:
         return best
 
 
+def estimate_target_reach_time(chamber_heat_capacity, heater_power,
+                               proportional_band_c=TARGET_PROPORTIONAL_BAND_C,
+                               min_s=MIN_TARGET_REACH_TIME_S,
+                               max_s=MAX_TARGET_REACH_TIME_S):
+    """Estimate target_reach_time (s) for a target proportional band.
+
+    Chooses tau = proportional_band_c * C / P_heater so that a temperature
+    error of proportional_band_c requests 100% heater power, clamped to
+    [min_s, max_s].
+    """
+    if chamber_heat_capacity <= 0 or heater_power <= 0:
+        return float(min_s)
+    tau = proportional_band_c * chamber_heat_capacity / heater_power
+    return max(float(min_s), min(float(max_s), tau))
+
+
+def estimate_measurement_noise(samples, min_variance=1e-4):
+    """Estimate S1 measurement noise variance R (K^2) from idle samples.
+
+    Removes any slow linear temperature drift via ordinary least squares
+    before computing the unbiased residual variance:
+        R = sum((T_i - T_hat_i)^2) / (n - 2)
+
+    Args:
+        samples: list of (time, temperature) tuples from an idle period
+        min_variance: floor for returned variance (K^2)
+
+    Returns:
+        estimated variance in K^2, or None if insufficient data
+    """
+    n = len(samples)
+    if n < 5:
+        return None
+
+    t_mean = sum(t for t, _ in samples) / n
+    T_mean = sum(T for _, T in samples) / n
+
+    s_tt = sum((t - t_mean) ** 2 for t, _ in samples)
+    if s_tt > 1e-12:
+        s_tT = sum((t - t_mean) * (T - T_mean) for t, T in samples)
+        slope = s_tT / s_tt
+    else:
+        slope = 0.0
+
+    rss = sum((T - (T_mean + slope * (t - t_mean))) ** 2 for t, T in samples)
+    variance = rss / (n - 2)
+    return max(min_variance, variance)
+
+
 def estimate_h_from_cooling(samples, chamber_heat_capacity, t_ambient,
                             center_temp, window=10.0):
     """Estimate h from passive cooling slope around a target temperature.
@@ -332,9 +387,14 @@ def format_calibration_report(result, cooling_rates):
         "Calibration complete.",
         "  chamber_heat_capacity   = %.1f J/K" % result.chamber_heat_capacity,
         "  s1_responsiveness = %.4f" % result.s1_responsiveness,
+    ]
+    if result.target_reach_time is not None:
+        lines.append(
+            "  target_reach_time = %.1f s" % result.target_reach_time)
+    lines.extend([
         "",
         "  h(T) calibration:",
-    ]
+    ])
 
     for T, h in result.h_points:
         rate = None
@@ -356,5 +416,14 @@ def format_calibration_report(result, cooling_rates):
         lines.append("")
         lines.append(
             "  bed_transfer = %.4f W/K" % result.bed_transfer)
+
+    if result.suggested_measurement_noise_s1 is not None:
+        lines.append("")
+        lines.append(
+            "  Suggested optimization (not auto-saved):")
+        lines.append(
+            "    measurement_noise_s1: %.4f  "
+            "(measured S1 sensor noise variance in K^2)"
+            % result.suggested_measurement_noise_s1)
 
     return lines

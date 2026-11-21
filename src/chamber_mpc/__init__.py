@@ -132,13 +132,14 @@ class ChamberMpcModule:
             issues.append(
                 "ambient_transfer_points or ambient_transfer not calibrated")
 
-        # Validate s2_safe_temp > heater max_temp
-        s2_max = p['s2_safe_temp']
-        heater_max = heater.max_temp
-        if s2_max <= heater_max:
-            issues.append(
-                "s2_safe_temp (%.0f) must be greater than "
-                "heater max_temp (%.0f)" % (s2_max, heater_max))
+        # Validate s2_safe_temp > heater max_temp when secondary sensor is used
+        if p['secondary_sensor']:
+            s2_max = p['s2_safe_temp']
+            heater_max = heater.max_temp
+            if s2_max <= heater_max:
+                issues.append(
+                    "s2_safe_temp (%.0f) must be greater than "
+                    "heater max_temp (%.0f)" % (s2_max, heater_max))
 
         return issues
 

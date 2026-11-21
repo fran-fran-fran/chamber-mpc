@@ -54,6 +54,8 @@ class HInterpolator:
             t_lo, h_lo = pts[i]
             t_hi, h_hi = pts[i + 1]
             if t_lo <= temp_c <= t_hi:
+                if t_hi == t_lo:
+                    return h_hi
                 frac = (temp_c - t_lo) / (t_hi - t_lo)
                 return h_lo + frac * (h_hi - h_lo)
 

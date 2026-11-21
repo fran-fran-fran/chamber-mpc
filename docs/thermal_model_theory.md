@@ -196,7 +196,9 @@ driven to zero ($T_c \to T_{target}$) regardless of $\tau_{reach}$, as long as
 the heater is not saturated. Anti-windup during output limiting is preserved
 because model propagation uses $u_{actual}$ rather than $u_{desired}$ (not
 because of covariance decay: as $\epsilon \to 0$, the update $K_d \cdot \epsilon$
-vanishes while $K_d$ itself remains constant and nonzero).
+vanishes while $K_d$ itself remains constant and nonzero). As an additional
+fault guard (e.g., against a stuck sensor), $d$ is clamped to
+$[-P_{heater},\ +P_{heater}]$.
 
 ---
 
@@ -226,12 +228,47 @@ responsiveness accumulate.
 |---|---|
 | `chamber_heat_capacity` $C_c$ | Step response (max rate of rise, $C_c = P / \max(\dot{T}_{s1})$) |
 | `s1_responsiveness` $r_{s1}$ | Step response (lag analysis) |
+| `target_reach_time` $\tau_{reach}$ | Scaled from $C_c$ and $P_{heater}$ ($\text{clamp}(\Delta T_{band} \cdot C_c / P_{heater},\ 2,\ 60)\text{ s}$, $\Delta T_{band} = 5\text{ °C}$) |
 | `ambient_transfer_points` $h(T)$ | Steady-state power at each temperature |
 | `ambient_temp` $T_{amb}$ | Measured or provided via `T_AMBIENT` |
+| `measurement_noise_s1` $R$ | Detrended idle variance (reported as a suggestion, not auto-saved) |
 
 Note that estimating $C_c$ from $\max(\dot{T}_{s1})$ slightly overestimates
 $C_c$ whenever sensor lag or heat loss significantly attenuates the peak
 measured slope relative to $P / C_c$.
+
+### `target_reach_time` estimation
+
+During calibration, `target_reach_time` ($\tau_{reach}$) is chosen so that a
+temperature error equal to a target proportional band $\Delta T_{band} = 5\text{ °C}$
+requests 100% of the heater's nameplate power $P_{heater}$, clamped to
+$[2.0,\ 60.0]\text{ s}$:
+
+```math
+\tau_{reach} = \text{clamp}\!\left(\frac{\Delta T_{band} \cdot C_c}{P_{heater}},\ 2.0,\ 60.0\right)
+```
+
+Substituting this into the proportional heating term cancels $C_c$:
+
+```math
+P_{heat} = \frac{(T_{target} - T_c) \cdot C_c}{\tau_{reach}} = \frac{T_{target} - T_c}{\Delta T_{band}} \cdot P_{heater}
+```
+
+This makes Phase 2 holds and runtime control robust to $C_c$ estimation error
+while giving fast ovens and slow printer chambers the same smooth proportional
+band (100% power whenever more than ~5 °C below target, tapering smoothly near
+setpoint, with zero steady-state offset due to $-d$ in the output law).
+
+Typical examples:
+
+| System | $P_{heater}$ | $C_c$ | Unclamped $5 \cdot C_c / P_{heater}$ | Saved `target_reach_time` |
+|---|---|---|---|---|
+| Airfryer annealing oven | 1800 W | 500 J/K | 1.39 s | **2.0 s** (floor) |
+| 3D printer chamber (e.g. 420×420×460 mm) | 500 W | 2000 J/K | 20.0 s | **20.0 s** |
+| Large / low-power chamber | 300 W | 10000 J/K | 166.7 s | **60.0 s** (ceiling) |
+
+To override the calibrated value manually, remove `#*# target_reach_time` from
+the `SAVE_CONFIG` block and set `target_reach_time:` in `[chamber_mpc]`.
 
 ### h(T) identification
 

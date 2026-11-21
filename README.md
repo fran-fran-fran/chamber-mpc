@@ -68,7 +68,7 @@ bed_transfer: 0.35
 | `heater_power` | required | none | Heater nameplate power in watts |
 | `chamber_heat_capacity` | required | calibrated | Chamber thermal mass in J/K |
 | `s1_responsiveness` | required | calibrated | S1 lag coefficient [1/s]. S1 is the main sensor (used for setpoint tracking), as configured in the `[heater_generic]` defined in `heater` |
-| `target_reach_time` | optional | 2.0 | Closed-loop exponential time constant $\tau_{\text{reach}}$ [s] (sets proportional gain $C_c / \tau_{\text{reach}}$) |
+| `target_reach_time` | optional | 2.0 (calibrated) | Closed-loop exponential time constant $\tau_{\text{reach}}$ [s] (sets proportional gain $C_c / \tau_{\text{reach}}$) |
 | `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the `heater`'s `max_temp` minus this margin [°C], to avoid shutdown due to temperature overshoot |
 | `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature [°C] used by the model |
 | `ambient_temp_sensor` | optional | none | Name of external `[temperature_sensor]` for ambient temperature |
@@ -106,7 +106,7 @@ MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=80,130 T_AMBIENT=28
 ### With bed transfer measurement
 
 ```gcode
-MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=110 T_AMBIENT=25
+MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=90 T_AMBIENT=25
 ```
 
 Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to printer.cfg.
