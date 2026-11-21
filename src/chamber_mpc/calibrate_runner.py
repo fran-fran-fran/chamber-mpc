@@ -335,7 +335,9 @@ class MpcChamberCalibrateRunner:
                     % (target, settle_timeout, actual_temp))
 
             # Measure steady-state power and actual hold temperature
-            gcmd.respond_info("    Measuring steady-state power...")
+            gcmd.respond_info(
+                "    Measuring steady-state power (%.0f s)..."
+                % POWER_MEASURE_WINDOW_S)
             avg_duty, avg_temp = self._measure_steady_state(
                 POWER_MEASURE_WINDOW_S)
             avg_power_watts = avg_duty * heater_power
@@ -360,8 +362,7 @@ class MpcChamberCalibrateRunner:
             gcmd.respond_info(
                 "Phase 3: Bed transfer measurement at bed=%.0f\u00b0C..."
                 % bed_temp)
-            chamber_target = (
-                result.h_points[-1][0] if result.h_points else points[-1])
+            chamber_target = points[-1]
             try:
                 result.bed_transfer = self._measure_bed_transfer(
                     gcmd, bed_temp, chamber_target, result, heater_power,
@@ -664,7 +665,9 @@ class MpcChamberCalibrateRunner:
         self.heater.set_temp(chamber_target)
 
         # Measure baseline power (bed off)
-        gcmd.respond_info("    Measuring baseline power (bed off)...")
+        gcmd.respond_info(
+            "    Measuring baseline power (bed off, %.0f s)..."
+            % POWER_MEASURE_WINDOW_S)
         settled, actual_temp = self._wait_settle(
             chamber_target, settle_timeout, model, gcmd)
         if not settled:
@@ -721,7 +724,9 @@ class MpcChamberCalibrateRunner:
                 % (chamber_target, settle_timeout, bed_temp, actual_temp))
 
         # Measure power with bed on
-        gcmd.respond_info("    Measuring power with bed on...")
+        gcmd.respond_info(
+            "    Measuring power with bed on (%.0f s)..."
+            % POWER_MEASURE_WINDOW_S)
         power_with_bed = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
         power_with_bed_watts = power_with_bed * heater_power
 

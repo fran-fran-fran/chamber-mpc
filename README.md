@@ -58,6 +58,13 @@ heater: chamber
 heater_power: 600
 bed_heater: heater_bed
 bed_transfer: 0.35
+
+# Optional: expose the Kalman-estimated chamber temperature in graphs / M105
+# (must appear after [chamber_mpc] in printer.cfg)
+[temperature_sensor Chamber_MPC]
+sensor_type: mpc_chamber_temperature
+min_temp: -10
+max_temp: 100
 ```
 
 ### Configuration reference

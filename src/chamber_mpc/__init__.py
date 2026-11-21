@@ -18,6 +18,7 @@ except ImportError:
 import logging
 
 from .control import ControlMPCChamber
+from .temp_sensor import ChamberMpcTempSensor
 
 
 class ChamberMpcModule:
@@ -40,6 +41,12 @@ class ChamberMpcModule:
         # Parse all MPC parameters into a profile dict
         self.profile = self._parse_profile(config)
         self.profile['name'] = 'chamber_mpc'
+
+        # Register virtual temperature_sensor type (mpc_chamber_temperature)
+        pheaters = self.printer.load_object(config, 'heaters')
+        if hasattr(pheaters, 'add_sensor_factory'):
+            pheaters.add_sensor_factory(
+                'mpc_chamber_temperature', ChamberMpcTempSensor)
 
         # Register GCode commands during config loading phase
         gcode = self.printer.lookup_object('gcode')
