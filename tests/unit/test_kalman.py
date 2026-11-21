@@ -28,13 +28,21 @@ class TestKalmanFilter3:
     def test_update_returns_three_corrections(self):
         from chamber_mpc.kalman import KalmanFilter3
         kf = KalmanFilter3(1.0, 0.1, 0.5, 0.5)
+        # From diagonal P, d couples into T_c on step 1 and into T_s on step 2
         kf.predict(0.3, 0.03, 500.0)
-        corr = kf.update(1.0)
-        assert len(corr) == 3
+        corr1 = kf.update(1.0)
+        assert len(corr1) == 3
+        assert corr1[0] > 0  # chamber
+        assert corr1[1] > 0  # sensor
+        assert corr1[2] == 0.0  # no d <-> T_s covariance after 1 step
+
+        kf.predict(0.3, 0.03, 500.0)
+        corr2 = kf.update(1.0)
+        assert len(corr2) == 3
         # All corrections should be positive for positive innovation
-        assert corr[0] > 0  # chamber
-        assert corr[1] > 0  # sensor
-        assert corr[2] > 0  # disturbance
+        assert corr2[0] > 0  # chamber
+        assert corr2[1] > 0  # sensor
+        assert corr2[2] > 0  # disturbance
 
     def test_disturbance_accumulates(self):
         """With persistent positive innovation, disturbance grows."""
@@ -76,3 +84,39 @@ class TestKalmanFilter3:
         assert abs(p[1] - p[3]) < 1e-10
         assert abs(p[2] - p[6]) < 1e-10
         assert abs(p[5] - p[7]) < 1e-10
+
+    def test_predict_matches_reference_matrix_math(self):
+        """Verify predict() computes A * P * A^T + Q * dt exactly."""
+        from chamber_mpc.kalman import KalmanFilter3
+        dt, r_s1, C = 0.3, 0.08, 360.0
+        qc, qs, qd, r_meas = 1.0, 0.1, 10.0, 0.5
+        kf = KalmanFilter3(qc, qs, qd, r_meas)
+        # Non-diagonal symmetric initial P to exercise all cross terms
+        P = [
+            [5.0, 1.2, 3.4],
+            [1.2, 2.0, 0.7],
+            [3.4, 0.7, 50.0],
+        ]
+        kf.p = [P[i][j] for i in range(3) for j in range(3)]
+
+        kf.predict(dt, r_s1, C)
+
+        r = r_s1 * dt
+        a02 = dt / C
+        A = [
+            [1.0, 0.0, a02],
+            [r, 1.0 - r, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        # Reference: A @ P @ A^T + Q * dt
+        AP = [[sum(A[i][k] * P[k][j] for k in range(3)) for j in range(3)]
+              for i in range(3)]
+        expected = [[sum(AP[i][k] * A[j][k] for k in range(3)) for j in range(3)]
+                    for i in range(3)]
+        expected[0][0] += qc * dt
+        expected[1][1] += qs * dt
+        expected[2][2] += qd * dt
+
+        for i in range(3):
+            for j in range(3):
+                assert abs(kf.p[i * 3 + j] - expected[i][j]) < 1e-12

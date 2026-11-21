@@ -278,20 +278,21 @@ class MpcChamberCalibrateRunner:
                     "SETTLE_TIMEOUT or check the heater."
                     % (target, settle_timeout, actual_temp))
 
-            # Measure steady-state power
+            # Measure steady-state power and actual hold temperature
             gcmd.respond_info("    Measuring steady-state power...")
-            avg_duty = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
+            avg_duty, avg_temp = self._measure_steady_state(
+                POWER_MEASURE_WINDOW_S)
             avg_power_watts = avg_duty * heater_power
 
             # Compute h at actual hold temperature
-            delta_T = target - result.t_ambient
+            delta_T = avg_temp - result.t_ambient
             if delta_T <= 0:
                 raise self.printer.command_error(
-                    "Target %.1f <= ambient %.1f, cannot compute h"
-                    % (target, result.t_ambient))
+                    "Measured temperature %.1f <= ambient %.1f, "
+                    "cannot compute h" % (avg_temp, result.t_ambient))
             h = avg_power_watts / delta_T
-            result.h_points.append((target, h))
-            gcmd.respond_info("    h(%.1f) = %.4f W/K" % (target, h))
+            result.h_points.append((avg_temp, h))
+            gcmd.respond_info("    h(%.1f) = %.4f W/K" % (avg_temp, h))
 
             # Swap back to tuning control between points. Klipper's
             # set_control() resets the heater target to 0, so no extra
@@ -324,9 +325,9 @@ class MpcChamberCalibrateRunner:
         """Build a ThermalModel with Kalman filter for calibration.
 
         Uses the profile's estimator tuning and target_reach_time. The
-        disturbance state absorbs persistent prediction errors; because
-        it is used in propagation but not in the output law, a small
-        steady-state offset can remain when h is inaccurate.
+        disturbance state absorbs persistent prediction errors and
+        cancels steady-state offset even when the initial h estimate
+        is inaccurate.
         """
         kalman = KalmanFilter3(
             process_noise_chamber=self.profile.get(
@@ -466,27 +467,41 @@ class MpcChamberCalibrateRunner:
 
     # -- Phase 2: Steady-state measurement utilities --
 
-    def _measure_avg_power(self, window_s):
-        """Measure average heater duty cycle over a time window.
+    def _measure_steady_state(self, window_s):
+        """Measure average heater duty cycle and chamber temperature over a window.
 
-        Returns average duty cycle as a fraction 0.0-1.0.
+        Returns (avg_duty, avg_temp) where avg_duty is in 0.0-1.0 and
+        avg_temp is in deg C.
         """
-        samples = []
+        power_samples = []
+        temp_samples = []
         start_time = [None]
 
         def process(eventtime):
             if start_time[0] is None:
                 start_time[0] = eventtime
             status = self.heater.get_status(eventtime)
-            power = status.get('power', 0.0)
-            samples.append(power)
+            power_samples.append(status.get('power', 0.0))
+            temp, _ = self.heater.get_temp(eventtime)
+            temp_samples.append(temp)
             return eventtime - start_time[0] < window_s
 
         self.printer.wait_while(process)
 
-        if not samples:
-            return 0.0
-        return sum(samples) / len(samples)
+        if not power_samples:
+            temp, _ = self.heater.get_temp(self.heater.reactor.monotonic())
+            return (0.0, temp)
+        avg_duty = sum(power_samples) / len(power_samples)
+        avg_temp = sum(temp_samples) / len(temp_samples)
+        return (avg_duty, avg_temp)
+
+    def _measure_avg_power(self, window_s):
+        """Measure average heater duty cycle over a time window.
+
+        Returns average duty cycle as a fraction 0.0-1.0.
+        """
+        avg_duty, _ = self._measure_steady_state(window_s)
+        return avg_duty
 
     # -- Phase 3: Bed transfer --
 

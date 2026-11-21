@@ -18,8 +18,9 @@ class KalmanFilter3:
 
     The disturbance state d is an integrating state (no dynamics)
     that captures persistent model-parameter errors (e.g. wrong h).
-    It is added to the heater power in the propagation step, reducing
-    steady-state error without integral windup.
+    It is added to heater power in propagation and subtracted in the
+    control output law for offset-free tracking; anti-windup comes
+    from propagating the model with actual applied power.
     """
 
     def __init__(self, process_noise_chamber, process_noise_s1,
@@ -86,15 +87,18 @@ class KalmanFilter3:
         ap[8] = p[8]
 
         # (A*P) * A^T
-        # A^T columns: [1, r, 0], [0, 1-r, 0], [a02, 0, 1]
+        # A^T columns (= rows of A):
+        #   col 0: [1, 0, a02]
+        #   col 1: [r, 1-r, 0]
+        #   col 2: [0, 0, 1]
         new_p = [0.0] * 9
         for i in range(3):
-            # Column 0 of A^T: [1, r, 0]
-            new_p[i * 3 + 0] = ap[i * 3 + 0] + ap[i * 3 + 1] * r
-            # Column 1 of A^T: [0, 1-r, 0]
-            new_p[i * 3 + 1] = ap[i * 3 + 1] * (1.0 - r)
-            # Column 2 of A^T: [a02, 0, 1]
-            new_p[i * 3 + 2] = ap[i * 3 + 0] * a02 + ap[i * 3 + 2]
+            # Column 0 of A^T: [1, 0, a02]
+            new_p[i * 3 + 0] = ap[i * 3 + 0] + ap[i * 3 + 2] * a02
+            # Column 1 of A^T: [r, 1-r, 0]
+            new_p[i * 3 + 1] = ap[i * 3 + 0] * r + ap[i * 3 + 1] * (1.0 - r)
+            # Column 2 of A^T: [0, 0, 1]
+            new_p[i * 3 + 2] = ap[i * 3 + 2]
 
         # Add Q (diagonal)
         new_p[0] += self.q_chamber * dt

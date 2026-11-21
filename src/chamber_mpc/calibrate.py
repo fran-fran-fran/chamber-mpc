@@ -342,6 +342,11 @@ def format_calibration_report(result, cooling_rates):
             if ct == round(T):
                 rate = cr
                 break
+        if rate is None and result.chamber_heat_capacity > 0:
+            rate = (
+                -h * (T - result.t_ambient)
+                / result.chamber_heat_capacity * 60.0
+            )
         rate_str = "%.2f deg C/min" % rate if rate is not None else "N/A"
         lines.append(
             "    T=%5.1f\u00b0C  h=%.4f W/K  -> passive cool rate: %s"

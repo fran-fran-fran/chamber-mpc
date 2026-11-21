@@ -11,7 +11,7 @@ Replaces standard PID control with a model-based controller that provides feedfo
 - **Single-point calibration** - for narrow operating ranges (e.g. printer chambers at 50-80 deg C), one calibration point is sufficient
 - **Heating element temperature limiting** - optional secondary sensor constrains output to protect heating elements from overtemperature, with model-aware anti-windup
 - **Bed heater feedforward** - optional measured disturbance rejection for printer chambers where the bed contributes heat
-- **Kalman filter with disturbance estimation** - optimal per-state correction gains adapt automatically to operating conditions, with an integrating disturbance state that reduces steady-state error despite model inaccuracy
+- **Kalman filter with disturbance estimation** - per-state correction gains computed from the thermal model and noise covariances, with an integrating disturbance state that eliminates observer bias and steady-state error despite model inaccuracy
 - **Progressive calibration** - multi-point calibration runs in one ascending pass without cool-down between points
 
 ## Requirements
@@ -68,7 +68,7 @@ bed_transfer: 0.35
 | `heater_power` | required | none | Heater nameplate power in watts |
 | `chamber_heat_capacity` | required | calibrated | Chamber thermal mass in J/K |
 | `s1_responsiveness` | required | calibrated | S1 lag coefficient [1/s]. S1 is the main sensor (used for setpoint tracking), as configured in the `[heater_generic]` defined in `heater` |
-| `target_reach_time` | optional | 2.0 | Prediction horizon of the MPC [s] |
+| `target_reach_time` | optional | 2.0 | Closed-loop exponential time constant $\tau_{\text{reach}}$ [s] (sets proportional gain $C_c / \tau_{\text{reach}}$) |
 | `max_temp_margin` | optional | 5.0 | Control setpoint is clamped to the `heater`'s `max_temp` minus this margin [°C], to avoid shutdown due to temperature overshoot |
 | `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature [°C] used by the model |
 | `ambient_temp_sensor` | optional | none | Name of external `[temperature_sensor]` for ambient temperature |
@@ -132,7 +132,7 @@ The controller maintains a two-state thermal model:
 Each control tick:
 1. Propagate model forward using last actual applied power
 2. Correct model state by blending prediction with measurement
-3. Compute desired output (feedforward + loss compensation)
+3. Compute desired output (proportional heating + loss/bed/disturbance compensation)
 4. Constrain for heating element limit (if configured)
 5. Apply constrained output and record actual power for next tick
 

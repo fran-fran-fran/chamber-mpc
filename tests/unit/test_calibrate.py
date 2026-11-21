@@ -134,6 +134,53 @@ class TestFormatting:
         assert "bed_transfer" in text
         assert "0.35" in text
 
+    def test_report_computes_cooling_rate_for_non_grid_temp(self):
+        result = CalibrationResult()
+        result.chamber_heat_capacity = 360.0
+        result.s1_responsiveness = 0.08
+        result.h_points = [(69.4, 0.15)]
+        result.t_ambient = 22.0
+        rates = compute_cooling_rates(
+            result.h_points, result.chamber_heat_capacity, result.t_ambient)
+        report = format_calibration_report(result, rates)
+        text = "\n".join(report)
+        assert "N/A" not in text
+        assert "deg C/min" in text
+
+
+class TestMeasureSteadyState:
+    def test_measures_avg_power_and_temp(self):
+        from chamber_mpc.calibrate_runner import MpcChamberCalibrateRunner
+
+        class DummyPrinter:
+            def wait_while(self, fn):
+                t = 0.0
+                while fn(t):
+                    t += 1.0
+
+        class DummyReactor:
+            def monotonic(self):
+                return 10.0
+
+        class DummyHeater:
+            def __init__(self):
+                self.reactor = DummyReactor()
+
+            def get_status(self, t):
+                return {'power': 0.25 if t < 5.0 else 0.75}
+
+            def get_temp(self, t):
+                return (69.0 if t < 5.0 else 71.0, 70.0)
+
+        class DummyControl:
+            profile = {}
+
+        runner = MpcChamberCalibrateRunner(
+            DummyPrinter(), DummyHeater(), DummyControl())
+        avg_duty, avg_temp = runner._measure_steady_state(9.0)
+        assert avg_duty == pytest.approx(0.5)
+        assert avg_temp == pytest.approx(70.0)
+
 class TestShortStepResponse:
     def test_short_ramp_does_not_crash(self):
         """A ramp from 22 to 60 deg C should still produce valid results."""

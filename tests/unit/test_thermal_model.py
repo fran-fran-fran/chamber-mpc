@@ -281,3 +281,69 @@ class TestBasicKalmanEstimator:
         duty = model.update(0.1, 200.0, 100.0, 1.0)
         assert duty >= 0.0
         assert duty <= 1.0
+
+    def test_offset_free_steady_state_with_wrong_h(self):
+        """Subtracting d in output eliminates steady-state offset even at large tau."""
+        C, r_s1, h_true, h_model = 360.0, 0.08, 0.50, 0.20
+        T_amb, target, P_heater, dt = 25.0, 100.0, 1800.0, 0.3
+        kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
+        model = ThermalModel(
+            chamber_heat_capacity=C,
+            s1_responsiveness=r_s1,
+            h_interpolator=HInterpolator([(100.0, h_model)]),
+            heater_power=P_heater,
+            target_reach_time=60.0,
+            kalman_filter=kalman,
+        )
+        model.set_initial_state(T_amb)
+        model.set_ambient(T_amb)
+
+        Tc = Ts = T_amb
+        t, duty = 0.0, 0.0
+        for _ in range(15000):
+            t += dt
+            Tc += (duty * P_heater - h_true * (Tc - T_amb)) * dt / C
+            Ts += r_s1 * (Tc - Ts) * dt
+            duty = model.update(t, Ts, target, 1.0)
+
+        assert Tc == pytest.approx(target, abs=0.01)
+        expected_d = (h_model - h_true) * (target - T_amb)
+        assert model.state_disturbance == pytest.approx(expected_d, abs=0.1)
+
+    def test_no_windup_under_element_limiter(self):
+        """Disturbance state does not wind up while secondary sensor limits output."""
+        C, r_s1, h_true, h_model = 360.0, 0.08, 0.50, 0.20
+        T_amb, target, P_heater, dt = 25.0, 150.0, 1800.0, 0.3
+        kalman = KalmanFilter3(1.0, 0.1, 10.0, 0.5)
+        model = ThermalModel(
+            chamber_heat_capacity=C,
+            s1_responsiveness=r_s1,
+            h_interpolator=HInterpolator([(100.0, h_model)]),
+            heater_power=P_heater,
+            target_reach_time=2.0,
+            kalman_filter=kalman,
+        )
+        model.set_initial_state(T_amb)
+        model.set_ambient(T_amb)
+
+        Tc = Ts = Te = T_amb
+        model.set_secondary_sensor_limit(
+            lambda _t: (Te, 0.0), max_temp=200.0, margin=20.0)
+
+        t, duty = 0.0, 0.0
+        d_min = 0.0
+        for _ in range(15000):
+            t += dt
+            for _ in range(5):
+                sub_dt = dt / 5.0
+                q_e = 5.0 * (Te - Tc)
+                Te += (duty * P_heater - q_e) * sub_dt / 50.0
+                Tc += (q_e - h_true * (Tc - T_amb)) * sub_dt / C
+                Ts += r_s1 * (Tc - Ts) * sub_dt
+            duty = model.update(t, Ts, target, 1.0)
+            d_min = min(d_min, model.state_disturbance)
+
+        expected_d = (h_model - h_true) * (target - T_amb)  # -37.5 W
+        assert Tc == pytest.approx(target, abs=0.05)
+        assert model.state_disturbance == pytest.approx(expected_d, abs=0.5)
+        assert d_min > expected_d - 5.0  # no windup excursion

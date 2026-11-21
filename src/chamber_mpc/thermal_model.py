@@ -23,7 +23,7 @@ class ThermalModel:
         state_ambient_temp: estimated ambient temperature (deg C)
 
     Model equation:
-        C * dT_chamber/dt = P_heater + P_bed - h(T) * (T_chamber - T_ambient)
+        C * dT_chamber/dt = P_heater + d + P_bed - h(T) * (T_chamber - T_ambient)
         dT_s1/dt = s1_responsiveness * (T_chamber - T_s1)
     """
 
@@ -261,15 +261,13 @@ class ThermalModel:
             except Exception:
                 pass  # sensor read failure
 
-        # Total power needed
-        # Note: disturbance is in propagation only (not output).
-        # The Kalman filter estimates d from persistent prediction
-        # errors, and d corrects the model's internal state prediction.
-        # The output computation sees the corrected state_chamber_temp
-        # and naturally adjusts power accordingly.
+        # Total power needed (offset-free MPC: subtract estimated disturbance d,
+        # which represents unmodeled net power entering the chamber).
+        # Anti-windup during output limiting is preserved because _propagate()
+        # uses the actual applied power (last_power), not the desired power.
         power = max(0.0, min(
             max_power * self.heater_power,
-            heating_power + loss_ambient + loss_bed
+            heating_power + loss_ambient + loss_bed - self.state_disturbance
         ))
 
         return power / self.heater_power
