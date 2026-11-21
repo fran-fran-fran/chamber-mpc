@@ -16,7 +16,7 @@ import logging
 # Defaults for calibration control
 SETTLE_TOLERANCE_C = 1.0
 SETTLE_DURATION_S = 120.0
-SETTLE_TIMEOUT_S = 600.0  # max wait for a chamber settle
+SETTLE_TIMEOUT_S = 1800.0  # max wait for a chamber ramp/cool/settle (30 min)
 POWER_MEASURE_WINDOW_S = 180.0
 STEP_RESPONSE_POWER = 1.0  # full power for step response
 BED_COOLDOWN_TOLERANCE_C = 5.0  # bed must be within this of chamber temp
