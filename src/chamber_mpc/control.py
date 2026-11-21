@@ -69,6 +69,11 @@ class ControlMPCChamber:
         self._s2_safe_temp_zone = profile.get(
             's2_safe_temp_zone', 20.0)
         self._ambient_sensor_name = profile.get('ambient_temp_sensor')
+        self._chamber_fan_name = profile.get('chamber_fan')
+        self._chamber_fan_speed = float(
+            profile.get('chamber_fan_speed', 1.0))
+        self._chamber_fan = None
+        self._chamber_fan_active = False
 
     def _build_h_interpolator(self, profile):
         """Build HInterpolator from profile parameters."""
@@ -172,6 +177,39 @@ class ControlMPCChamber:
                     "Could not set up ambient sensor '%s': %s",
                     self._ambient_sensor_name, e)
 
+        # Optional [fan_generic] tied to chamber heating
+        if self._chamber_fan_name:
+            try:
+                fan_obj = printer.lookup_object(
+                    'fan_generic %s' % self._chamber_fan_name)
+                self._chamber_fan = getattr(fan_obj, 'fan', fan_obj)
+                self.log.info(
+                    "Chamber fan enabled: %s (speed=%.0f%%)",
+                    self._chamber_fan_name,
+                    self._chamber_fan_speed * 100.0)
+            except Exception as e:
+                self.log.warning(
+                    "Could not set up chamber fan '%s': %s",
+                    self._chamber_fan_name, e)
+
+    def _update_chamber_fan(self, active):
+        """Toggle the optional [fan_generic] on heating state transitions.
+
+        Only sends commands on transitions (off -> on, on -> off) so manual
+        fan control via SET_FAN_SPEED / UI is not overridden while the
+        chamber heater is off.
+        """
+        if self._chamber_fan is None or active == self._chamber_fan_active:
+            return
+        speed = self._chamber_fan_speed if active else 0.0
+        try:
+            self._chamber_fan.set_speed_from_command(speed)
+            self._chamber_fan_active = active
+        except Exception as e:
+            self.log.warning(
+                "Could not set chamber fan '%s' speed: %s",
+                self._chamber_fan_name, e)
+
     # -- Klipper control interface --
 
     def temperature_update(self, read_time, temp, target_temp):
@@ -193,6 +231,7 @@ class ControlMPCChamber:
             self._cap_warned = False
 
         max_power = self.heater.max_power
+        self._update_chamber_fan(target_temp > 0.0)
         duty = self.model.update(read_time, temp, target_temp, max_power)
         self.heater.set_pwm(read_time, duty)
 

@@ -201,6 +201,8 @@ class MpcChamberCalibrateRunner:
         # Swap in tuning control for open-loop phases
         tuning = TuningControl(self.heater)
         old_control = self.heater.set_control(tuning)
+        fan_started = self._set_chamber_fan(
+            float(self.profile.get('chamber_fan_speed', 1.0)))
 
         try:
             result = self._run_calibration(
@@ -210,11 +212,13 @@ class MpcChamberCalibrateRunner:
         except self.printer.command_error as e:
             raise gcmd.error("Calibration failed: %s" % e)
         finally:
-            # Always restore original control and turn off heater
+            # Always restore original control and turn off heater/fan
             self.heater.set_control(old_control)
             self.heater.set_temp(0.0)
             if self._bed_heater is not None:
                 self._bed_heater.set_temp(0.0)
+            if fan_started:
+                self._set_chamber_fan(0.0)
 
     def _run_calibration(self, gcmd, tuning, points, bed_temp,
                          t_ambient_override=None, initial_h=None,
@@ -410,6 +414,23 @@ class MpcChamberCalibrateRunner:
         model.set_ambient(result.t_ambient)
         self._attach_secondary_sensor(model)
         return model
+
+    def _set_chamber_fan(self, speed):
+        """Set optional [fan_generic] speed if configured. Returns True if set."""
+        fan_name = self.profile.get('chamber_fan')
+        if not fan_name:
+            return False
+        try:
+            fan_obj = self.printer.lookup_object(
+                'fan_generic %s' % fan_name)
+            fan = getattr(fan_obj, 'fan', fan_obj)
+            fan.set_speed_from_command(speed)
+            return True
+        except Exception as e:
+            self.log.warning(
+                "Could not set chamber fan '%s' during calibration: %s",
+                fan_name, e)
+            return False
 
     def _attach_secondary_sensor(self, model):
         """Attach the configured secondary-sensor limit to a model."""

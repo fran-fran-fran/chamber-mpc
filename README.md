@@ -78,6 +78,8 @@ bed_transfer: 0.35
 | `s2_safe_temp_zone` | optional | 20.0 | Temperature zone [°C] below the `s2_safe_temp` where control output starts tapering down proportionally to 0 |
 | `bed_heater` | optional | none | Name of `[heater_bed]` for bed disturbance feedforward |
 | `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient [W/K] |
+| `chamber_fan` | optional | none | Name of `[fan_generic]` (e.g. air scrubber / second convection fan) automatically turned on during calibration and chamber heating, while still allowing manual control when the chamber heater is off |
+| `chamber_fan_speed` | optional | 1.0 | Speed (0.0-1.0) for `chamber_fan` during calibration and heating |
 | `process_noise_chamber` | optional | 1.0 | Kalman Q matrix: process noise for chamber state $Q_c$ |
 | `process_noise_s1` | optional | 0.1 | Kalman Q matrix: process noise for S1 state $Q_{s1}$ |
 | `process_noise_disturbance` | optional | 10.0 | Kalman Q matrix: process noise for disturbance state $Q_d$ (controls how fast the disturbance adapts) |

@@ -111,6 +111,11 @@ class ChamberMpcModule:
         profile['ambient_temp_sensor'] = config.get(
             'ambient_temp_sensor', default=None)
 
+        # Optional: [fan_generic] tied to chamber heating & calibration
+        profile['chamber_fan'] = config.get('chamber_fan', default=None)
+        profile['chamber_fan_speed'] = config.getfloat(
+            'chamber_fan_speed', 1.0, minval=0.0, maxval=1.0)
+
         return profile
 
     def _validate_config(self, heater):

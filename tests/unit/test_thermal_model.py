@@ -403,3 +403,140 @@ class TestConfigValidation:
         issues = mod._validate_config(DummyHeater())
         assert len(issues) == 1
         assert "s2_safe_temp" in issues[0]
+
+
+class TestChamberFanControl:
+    def test_runtime_toggles_fan_only_on_transitions(self):
+        from chamber_mpc.control import ControlMPCChamber
+
+        class DummyFan:
+            def __init__(self):
+                self.speeds = []
+
+            def set_speed_from_command(self, value):
+                self.speeds.append(value)
+
+        class DummyFanGeneric:
+            def __init__(self):
+                self.fan = DummyFan()
+
+        class DummyReactor:
+            def monotonic(self):
+                return 0.0
+
+        class DummyPrinter:
+            def __init__(self, fan_generic):
+                self.fan_generic = fan_generic
+                self.handlers = {}
+
+            def register_event_handler(self, name, fn):
+                self.handlers[name] = fn
+
+            def lookup_object(self, name):
+                if name == 'fan_generic scrubber':
+                    return self.fan_generic
+                raise KeyError(name)
+
+        class DummyHeater:
+            max_temp = 80.0
+            max_power = 1.0
+
+            def __init__(self, printer):
+                self.printer = printer
+                self.reactor = DummyReactor()
+                self.pwms = []
+
+            def get_temp(self, t):
+                return (25.0, 0.0)
+
+            def set_pwm(self, t, duty):
+                self.pwms.append(duty)
+
+        fan_generic = DummyFanGeneric()
+        printer = DummyPrinter(fan_generic)
+        heater = DummyHeater(printer)
+        profile = {
+            'heater_power': 500.0,
+            'chamber_heat_capacity': 1500.0,
+            's1_responsiveness': 0.05,
+            'ambient_transfer': 2.0,
+            'chamber_fan': 'scrubber',
+            'chamber_fan_speed': 0.75,
+        }
+        ctrl = ControlMPCChamber(profile, heater)
+        ctrl._handle_ready()
+
+        # Idle ticks (target=0): never touches fan (preserves manual control)
+        ctrl.temperature_update(0.3, 25.0, 0.0)
+        ctrl.temperature_update(0.6, 25.0, 0.0)
+        assert fan_generic.fan.speeds == []
+
+        # Heating starts: turns fan on ONCE
+        ctrl.temperature_update(0.9, 25.0, 60.0)
+        ctrl.temperature_update(1.2, 26.0, 60.0)
+        assert fan_generic.fan.speeds == [0.75]
+
+        # Heating stops: turns fan off ONCE
+        ctrl.temperature_update(1.5, 26.0, 0.0)
+        ctrl.temperature_update(1.8, 26.0, 0.0)
+        assert fan_generic.fan.speeds == [0.75, 0.0]
+
+    def test_calibration_turns_fan_on_and_off_on_error(self):
+        from chamber_mpc.calibrate_runner import MpcChamberCalibrateRunner
+
+        class DummyFan:
+            def __init__(self):
+                self.speeds = []
+
+            def set_speed_from_command(self, value):
+                self.speeds.append(value)
+
+        class DummyFanGeneric:
+            def __init__(self):
+                self.fan = DummyFan()
+
+        class DummyError(Exception):
+            pass
+
+        class DummyPrinter:
+            command_error = DummyError
+
+            def __init__(self, fg):
+                self.fg = fg
+
+            def lookup_object(self, name):
+                if name == 'fan_generic scrubber':
+                    return self.fg
+                raise KeyError(name)
+
+        class DummyHeater:
+            max_temp = 80.0
+            max_power = 1.0
+
+            def set_control(self, ctrl):
+                return ctrl
+
+            def set_temp(self, t):
+                pass
+
+        class DummyControl:
+            profile = {'chamber_fan': 'scrubber', 'chamber_fan_speed': 0.8}
+
+        class DummyGcmd:
+            error = DummyError
+
+            def get(self, key, default=None):
+                return "70" if key == "POINTS" else default
+
+            def get_float(self, key, default=None, above=None):
+                return default
+
+        fg = DummyFanGeneric()
+        runner = MpcChamberCalibrateRunner(
+            DummyPrinter(fg), DummyHeater(), DummyControl())
+        # Force an error inside _run_calibration to verify finally turns fan off
+        runner._run_calibration = lambda *a, **k: (_ for _ in ()).throw(
+            DummyError("boom"))
+        with pytest.raises(DummyError, match="boom"):
+            runner.run(DummyGcmd())
+        assert fg.fan.speeds == [0.8, 0.0]
