@@ -10,17 +10,14 @@
 import logging
 
 from .thermal_model import ThermalModel
-from .thermal_model_advanced import ThermalModelAdvanced
-from .kalman import KalmanFilter3, KalmanFilter4
+from .kalman import KalmanFilter3
 from .h_interpolator import HInterpolator
 
 
 class ControlMPCChamber:
     """Klipper heater control implementation for chamber MPC.
 
-    Supports four control modes built from two config parameters:
-        basic+kalman:   2-state model, Kalman filter correction
-        advanced+kalman: 4-state model, Kalman filter correction
+    Uses the 2-state thermal model with a 3-state Kalman estimator.
     """
 
     def __init__(self, profile, heater, load_clean=False):
@@ -42,10 +39,7 @@ class ControlMPCChamber:
             'klippy:ready', self._handle_ready)
 
     def _build_model(self, profile, heater, load_clean):
-        """Build the appropriate model+estimator from profile."""
-        model_type = profile.get('model_type', 'basic')
-        heater_power = profile.get('heater_power', 0)
-
+        """Build the model and estimator from the profile."""
         # Build h interpolator
         h_interp = self._build_h_interpolator(profile)
         if h_interp is None:
@@ -56,19 +50,14 @@ class ControlMPCChamber:
         # Common parameters
         chamber_heat_capacity = profile.get('chamber_heat_capacity')
         s1_responsiveness = profile.get('s1_responsiveness')
-        target_reach_time = profile.get('target_reach_time', 2.0)
 
         if not chamber_heat_capacity or not s1_responsiveness:
             self.model = None
             self._valid = False
             return
 
-        if model_type == 'advanced':
-            self._build_advanced_model(
-                profile, h_interp, heater, load_clean)
-        else:
-            self._build_basic_model(
-                profile, h_interp, heater, load_clean)
+        self._build_basic_model(
+            profile, h_interp, heater, load_clean)
 
         # Store config names for deferred lookup
         self._bed_heater_name = profile.get('bed_heater')
@@ -125,60 +114,12 @@ class ControlMPCChamber:
         self.model.set_ambient(ambient)
         self._valid = True
 
-    def _build_advanced_model(self, profile, h_interp, heater, load_clean):
-        """Build 4-state advanced model with Kalman estimator."""
-
-        heater_heat_capacity = profile.get('heater_heat_capacity')
-        heating_element_transfer = profile.get('heating_element_transfer')
-        s1_responsiveness = profile.get('s1_responsiveness')
-
-        if (not heater_heat_capacity or not heating_element_transfer
-                or not s1_responsiveness):
-            self.model = None
-            self._valid = False
-            return
-
-        kalman = KalmanFilter4(
-                process_noise_heater=profile.get(
-                    'process_noise_heater', 1.0),
-                process_noise_chamber=profile.get(
-                    'process_noise_chamber', 1.0),
-                process_noise_s1=profile.get(
-                    'process_noise_s1', 0.5),
-                process_noise_s2=profile.get(
-                    'process_noise_s2', 0.5),
-                measurement_noise_s1=profile.get(
-                    'measurement_noise_s1', 0.5),
-                measurement_noise_s2=profile.get(
-                    'measurement_noise_s2', 0.5),
-        )
-
-        self.model = ThermalModelAdvanced(
-            heater_heat_capacity=heater_heat_capacity,
-            chamber_heat_capacity=profile.get('chamber_heat_capacity'),
-            heating_element_transfer=heating_element_transfer,
-            s1_responsiveness=s1_responsiveness,
-            s2_responsiveness=profile.get('s2_responsiveness'),
-            h_interpolator=h_interp,
-            heater_power=profile.get('heater_power'),
-            target_reach_time=profile.get('target_reach_time', 2.0),
-            kalman_filter=kalman,
-        )
-
-        if not load_clean:
-            temp = heater.get_temp(heater.reactor.monotonic())[0]
-            self.model.set_initial_state(temp)
-        ambient = profile.get('ambient_temp', 25.0)
-        self.model.set_ambient(ambient)
-        self._valid = True
-
     def _handle_ready(self):
         """Resolve named references to other Klipper objects."""
         if self.model is None:
             return
 
         printer = self.printer
-        is_advanced = isinstance(self.model, ThermalModelAdvanced)
 
         # Bed disturbance feedforward
         if self._bed_heater_name:
@@ -202,31 +143,16 @@ class ControlMPCChamber:
                     'temperature_sensor %s' %
                     self._secondary_sensor_name)
 
-                if is_advanced:
-                    # Advanced model: S1 sensor for state observation
-                    self.model.set_s1_sensor(sensor.get_temp)
-                    self.model.set_secondary_sensor_limit(
-                        sensor.get_temp,
-                        self._s2_safe_temp,
-                        self._s2_safe_temp_zone)
-                    self.log.info(
-                        "Heating element sensor (S1) enabled: %s "
-                        "(model-integrated limit, max=%.0f, margin=%.0f)",
-                        self._secondary_sensor_name,
-                        self._s2_safe_temp,
-                        self._s2_safe_temp_zone)
-                else:
-                    # Basic model: external clamp
-                    self.model.set_secondary_sensor_limit(
-                        sensor.get_temp,
-                        self._s2_safe_temp,
-                        self._s2_safe_temp_zone)
-                    self.log.info(
-                        "Secondary sensor limit enabled: %s "
-                        "(external clamp, max=%.0f, margin=%.0f)",
-                        self._secondary_sensor_name,
-                        self._s2_safe_temp,
-                        self._s2_safe_temp_zone)
+                self.model.set_secondary_sensor_limit(
+                    sensor.get_temp,
+                    self._s2_safe_temp,
+                    self._s2_safe_temp_zone)
+                self.log.info(
+                    "Secondary sensor limit enabled: %s "
+                    "(external clamp, max=%.0f, margin=%.0f)",
+                    self._secondary_sensor_name,
+                    self._s2_safe_temp,
+                    self._s2_safe_temp_zone)
             except Exception as e:
                 self.log.warning(
                     "Could not set up secondary sensor sensor '%s': %s",
@@ -302,37 +228,23 @@ class ControlMPCChamber:
             gcmd.respond_info("MPC chamber: not calibrated")
             return
         status = self.model.get_status()
-        is_advanced = isinstance(self.model, ThermalModelAdvanced)
-
-        if is_advanced:
-            gcmd.respond_info(
-                "MPC chamber [advanced]: "
-                "heater=%.1f\u00b0C, chamber=%.1f\u00b0C, "
-                "s1=%.1f\u00b0C, s2=%.1f\u00b0C, "
-                "ambient=%.1f\u00b0C, power=%.1f W, "
-                "avg_power=%.1f W (%.0f%%)"
-                % (status['temp_heater'], status['temp_chamber'],
-                   status['temp_s1'], status['temp_s2'],
-                   status['temp_ambient'], status['power'],
-                   status['avg_power'], status['avg_duty'] * 100))
-        else:
-            k = status.get('kalman_gain')
-            k_str = ""
-            if k is not None:
-                k_str = ", kalman_gain=[%s]" % ", ".join("%.4f" % v for v in k)
-            d = status.get('disturbance', 0.0)
-            d_str = ""
-            if d != 0.0:
-                d_str = ", d=%.1f W" % d
-            gcmd.respond_info(
-                "MPC chamber [basic]: "
-                "chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
-                "ambient=%.1f\u00b0C, power=%.1f W, "
-                "avg_power=%.1f W (%.0f%%)%s%s"
-                % (status['temp_chamber'], status['temp_s1'],
-                   status['temp_ambient'], status['power'],
-                   status['avg_power'], status['avg_duty'] * 100,
-                   d_str, k_str))
+        k = status.get('kalman_gain')
+        k_str = ""
+        if k is not None:
+            k_str = ", kalman_gain=[%s]" % ", ".join("%.4f" % v for v in k)
+        d = status.get('disturbance', 0.0)
+        d_str = ""
+        if d != 0.0:
+            d_str = ", d=%.1f W" % d
+        gcmd.respond_info(
+            "MPC chamber: "
+            "chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
+            "ambient=%.1f\u00b0C, power=%.1f W, "
+            "avg_power=%.1f W (%.0f%%)%s%s"
+            % (status['temp_chamber'], status['temp_s1'],
+               status['temp_ambient'], status['power'],
+               status['avg_power'], status['avg_duty'] * 100,
+               d_str, k_str))
 
     # -- Status for Moonraker --
 

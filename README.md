@@ -11,7 +11,7 @@ Replaces standard PID control with a model-based controller that provides feedfo
 - **Single-point calibration** - for narrow operating ranges (e.g. printer chambers at 50-80 deg C), one calibration point is sufficient
 - **Heating element temperature limiting** - optional secondary sensor constrains output to protect heating elements from overtemperature, with model-aware anti-windup
 - **Bed heater feedforward** - optional measured disturbance rejection for printer chambers where the bed contributes heat
-- **Kalman filter with disturbance estimation** - optimal per-state correction gains adapt automatically to operating conditions, with an integrating disturbance state that provides offset-free control regardless of model accuracy
+- **Kalman filter with disturbance estimation** - optimal per-state correction gains adapt automatically to operating conditions, with an integrating disturbance state that reduces steady-state error despite model inaccuracy
 - **Progressive calibration** - multi-point calibration runs in one ascending pass without cool-down between points
 
 ## Requirements
@@ -19,7 +19,7 @@ Replaces standard PID control with a model-based controller that provides feedfo
 - Kalico (tested) or Klipper (untested, expected to work)
 - Python 3.9+
 - A `[heater_generic]` configured for your chamber heater
-- A working PID calibration on the heater (used as scaffolding during MPC calibration)
+- A valid `control:` entry in `[heater_generic]` (MPC calibration does not use PID; the PID values are only a fallback if MPC cannot initialize)
 
 ## Installation
 
@@ -66,7 +66,6 @@ bed_transfer: 0.35
 |-----------|-------------|---------|-------------|
 | `heater` | required | none | Name of the `[heater_generic]` to control |
 | `heater_power` | required | none | Heater nameplate power in watts |
-| `model_type` | optional | basic | Thermal model type: `basic` (2-state) or `advanced` (4-state) |
 | `chamber_heat_capacity` | required | calibrated | Chamber thermal mass in J/K |
 | `s1_responsiveness` | required | calibrated | S1 lag coefficient [1/s]. S1 is the main sensor (used for setpoint tracking), as configured in the `[heater_generic]` defined in `heater` |
 | `target_reach_time` | optional | 2.0 | Prediction horizon of the MPC [s] |
@@ -74,21 +73,15 @@ bed_transfer: 0.35
 | `ambient_temp` | optional | 25.0 (calibrated) | Ambient temperature [°C] used by the model |
 | `ambient_temp_sensor` | optional | none | Name of external `[temperature_sensor]` for ambient temperature |
 | `ambient_transfer_points` | required | calibrated | Temperature-dependent chamber-to-ambient heat transfer coefficient points. Defined as multi-line points (T, h(T)), with minimum of one point |
-| `secondary_sensor` | conditional | none | Name of the `[temperature_sensor]` placed on (or closer to) the heating element. This sensor is useful when the main sensor (defined in `heater`) is used to measure the chamber temperature. This is then used for limiting the temperature of the heating element for safety/longevity. Required for advanced model, optional for basic |
+| `secondary_sensor` | optional | none | Name of the `[temperature_sensor]` placed on (or closer to) the heating element. Used to limit the heating element temperature for safety/longevity when the main sensor (defined in `heater`) measures the chamber temperature |
 | `s2_safe_temp` | optional | 250.0 | Temperature limit [°C] for the heating element. The control output is turned off when the `secondary_sensor` reaches this temperature. Must be greater than `heater`'s `max_temp`. Must be smaller than `heating_element_sensor`'s `max_temp` |
 | `s2_safe_temp_zone` | optional | 20.0 | Temperature zone [°C] below the `s2_safe_temp` where control output starts tapering down proportionally to 0 |
 | `bed_heater` | optional | none | Name of `[heater_bed]` for bed disturbance feedforward |
 | `bed_transfer` | optional | 0.0 (calibrated) | Bed-to-chamber heat transfer coefficient [W/K] |
-| `heater_heat_capacity` | required for advanced model | calibrated | Heating element thermal mass [J/K] |
-| `heating_element_transfer` | required for advanced model | calibrated | Heater-to-chamber heat transfer coefficient [W/K] |
-| `s2_responsiveness` | required for advanced model | calibrated | S2 lag coefficient [1/s]. S2 is the optional secondary sensor, as defined in `secondary_sensor` |
 | `process_noise_chamber` | optional | 1.0 | Kalman Q matrix: process noise for chamber state $Q_c$ |
 | `process_noise_s1` | optional | 0.1 | Kalman Q matrix: process noise for S1 state $Q_{s1}$ |
 | `process_noise_disturbance` | optional | 10.0 | Kalman Q matrix: process noise for disturbance state $Q_d$ (controls how fast the disturbance adapts) |
-| `measurement_noise_s1` | optional | 0.5 | Kalman R: S1 measurement noise variance $R$ (basic model) or $R_1$ in R matrix (advanced model) |
-| `process_noise_heater` | optional (advanced model only) | 1.0 | Kalman Q matrix: process noise for heater state $Q_h$ |
-| `process_noise_s2` | optional (advanced model only) | 0.5 | Kalman Q matrix: process noise for S2 state $Q_{s2}$ |
-| `measurement_noise_s2` | optional (advanced model only) | 0.5 | Kalman R matrix: S2 measurement noise variance $R_2$ |
+| `measurement_noise_s1` | optional | 0.5 | Kalman R: S1 measurement noise variance $R$ |
 
 ## Calibration
 
@@ -118,11 +111,15 @@ MPC_CHAMBER_CALIBRATE HEATER=chamber POINTS=70 BED_TEMP=110 T_AMBIENT=25
 
 Calibration results are saved automatically. Run `SAVE_CONFIG` to persist to printer.cfg.
 
+For large or well-insulated chambers, increase `SETTLE_TIMEOUT` (chamber
+settling) and `BED_TIMEOUT` (bed reaching its target) if the defaults are too
+short.
+
 ## GCode command reference
 
 | Command | Parameters | Description |
 |---------|-----------|-------------|
-| `MPC_CHAMBER_CALIBRATE` | `HEATER=` `POINTS=` `T_AMBIENT=` `BED_TEMP=` | Run calibration |
+| `MPC_CHAMBER_CALIBRATE` | `HEATER=` `POINTS=` `T_AMBIENT=` `BED_TEMP=` `INITIAL_H=` `SETTLE_TIMEOUT=` `BED_TIMEOUT=` | Run calibration |
 | `MPC_CHAMBER_STATUS` | `HEATER=` | Report model state |
 
 ## How it works
@@ -159,9 +156,8 @@ chamber-mpc/
 +-- src/chamber_mpc/
 |   +-- __init__.py            # Klippy entry point, heater control registration
 |   +-- __version__.py         # Version
-|   +-- thermal_model.py       # Two-state basic model (T_chamber + T_sensor)
-|   +-- thermal_model_advanced.py # Four-state advanced model (T_heater + T_chamber + T_s1 + T_s2)
-|   +-- kalman.py              # Kalman filters for 2-state and 4-state models
+|   +-- thermal_model.py       # Two-state model (T_chamber + T_sensor)
+|   +-- kalman.py              # Kalman estimator for the 3-state model
 |   +-- h_interpolator.py      # h(T) interpolation from calibration points
 |   +-- control.py             # Klipper heater control interface
 |   +-- calibrate.py           # Calibration analysis (step response, h identification)

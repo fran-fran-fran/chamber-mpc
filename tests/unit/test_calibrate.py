@@ -4,7 +4,7 @@ import pytest
 from chamber_mpc.calibrate import (
     StepResponseAnalyzer,
     compute_cooling_rates, CalibrationResult,
-    format_calibration_report, format_cooling_rate_comments,
+    format_calibration_report,
 )
 
 
@@ -49,6 +49,24 @@ class TestStepResponseAnalyzer:
         analyzer = StepResponseAnalyzer(samples, 1800.0, 22.0)
         with pytest.raises(ValueError, match="Not enough"):
             analyzer.analyze()
+
+    def test_asymptotic_analysis_returns_value(self):
+        # Simulate a chamber with a lagging sensor so the asymptotic
+        # refinement has a resolvable sensor response.
+        C, h, P, r, T_amb, dt = 360.0, 0.15, 1800.0, 0.08, 22.0, 0.3
+        T = Ts = T_amb
+        samples = []
+        t = 0.0
+        while t < 600.0:
+            T += (P - h * (T - T_amb)) * dt / C
+            Ts += r * (T - Ts) * dt
+            samples.append((t, Ts))
+            t += dt
+        analyzer = StepResponseAnalyzer(samples, P, T_amb)
+        result = analyzer._try_asymptotic_analysis()
+        assert result is not None
+        assert 0.001 < result['s1_responsiveness'] < 1.0
+        assert result['asymp_temp'] > samples[-1][1]
 
 
 class TestComputeCoolingRates:
@@ -115,17 +133,6 @@ class TestFormatting:
         text = "\n".join(report)
         assert "bed_transfer" in text
         assert "0.35" in text
-
-    def test_comments_include_calibrated_markers(self):
-        result = CalibrationResult()
-        result.t_ambient = 22.0
-        result.h_points = [(60.0, 0.12), (100.0, 0.15)]
-        rates = compute_cooling_rates(
-            result.h_points, 360.0, result.t_ambient)
-        comments = format_cooling_rate_comments(result, rates)
-        text = "\n".join(comments)
-        assert "(calibrated)" in text
-
 
 class TestShortStepResponse:
     def test_short_ramp_does_not_crash(self):

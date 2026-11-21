@@ -11,15 +11,16 @@
 
 import math
 import logging
-import statistics
 
 
 # Defaults for calibration control
 SETTLE_TOLERANCE_C = 1.0
 SETTLE_DURATION_S = 120.0
+SETTLE_TIMEOUT_S = 600.0  # max wait for a chamber settle
 POWER_MEASURE_WINDOW_S = 180.0
 STEP_RESPONSE_POWER = 1.0  # full power for step response
 BED_COOLDOWN_TOLERANCE_C = 5.0  # bed must be within this of chamber temp
+BED_HEAT_TIMEOUT_S = 3600.0  # max wait for the bed to reach its target
 
 
 class CalibrationResult:
@@ -117,18 +118,15 @@ class StepResponseAnalyzer:
             s1_responsiveness = max(0.01, min(1.0,
                                                    abs(s1_responsiveness)))
 
-        # Try asymptotic method for refined s1_responsiveness
-        try:
-            asymp = self._try_asymptotic_analysis()  # pragma: no cover
-            if asymp is not None:
-                self.log.info(
-                    "Asymptotic refinement: asymp_T=%.1f",
-                    asymp['asymp_temp'])
-                if 0.001 < asymp['s1_responsiveness'] < 1.0:
-                    s1_responsiveness = asymp['s1_responsiveness']
-        except Exception as e:
+        # Try asymptotic method for refined s1_responsiveness. The method
+        # returns None when the response is too short for the analysis.
+        asymp = self._try_asymptotic_analysis()
+        if asymp is not None:
             self.log.info(
-                "Asymptotic analysis skipped (normal for short ramps): %s", e)
+                "Asymptotic refinement: asymp_T=%.1f",
+                asymp['asymp_temp'])
+            if 0.001 < asymp['s1_responsiveness'] < 1.0:
+                s1_responsiveness = asymp['s1_responsiveness']
 
         return {
             'chamber_heat_capacity': chamber_heat_capacity,
@@ -188,11 +186,16 @@ class StepResponseAnalyzer:
         if abs(denom2) < 0.01:
             return None  # pragma: no cover
 
-        s1_resp = chamber_resp / (1.0 - exp_term / denom2)
+        denom3 = 1.0 - exp_term / denom2
+        if abs(denom3) < 1e-6:
+            # Degenerate case: the sample has no resolvable sensor lag.
+            return None
+
+        s1_resp = chamber_resp / denom3
 
         return {
             'asymp_temp': asymp_T,
-            's1_responsiveness': sensor_resp,
+            's1_responsiveness': s1_resp,
         }
 
     def _fastest_rate(self, samples):
@@ -214,50 +217,6 @@ class StepResponseAnalyzer:
         if best[2] <= 0:
             raise ValueError("No positive temperature rise detected")  # pragma: no cover
         return best
-
-
-def estimate_h_from_arrival(samples, heater_power, chamber_heat_capacity,
-                           t_ambient, window=5):
-    """Estimate rough h from the last portion of a step response.
-
-    At the moment of arrival at target, the energy balance gives:
-        C * dT/dt = P - h * (T - T_amb)
-        h = (P - C * dT/dt) / (T - T_amb)
-
-    Uses the last `window` samples to estimate dT/dt at arrival.
-
-    Args:
-        samples: list of (time, temperature) tuples
-        heater_power: applied power in watts (P = duty * P_heater)
-        chamber_heat_capacity: C in J/K
-        t_ambient: ambient temperature in deg C
-        window: number of trailing samples for slope estimation
-
-    Returns:
-        estimated h in W/K (clamped to positive values)
-    """
-    if len(samples) < window + 1:
-        window = max(2, len(samples) // 2)
-
-    # Estimate dT/dt from trailing samples
-    tail = samples[-window:]
-    dt = tail[-1][0] - tail[0][0]
-    dT = tail[-1][1] - tail[0][1]
-    if dt <= 0:
-        return 0.1  # fallback
-
-    rate = dT / dt  # deg C/s at arrival
-    T_arrival = tail[-1][1]
-    delta_T = T_arrival - t_ambient
-
-    if delta_T <= 1.0:
-        return 0.1  # too close to ambient for meaningful estimate
-
-    h_est = (heater_power - chamber_heat_capacity * rate) / delta_T
-
-    # Clamp: h must be positive, and a rough estimate might be
-    # quite high if the system is still heating fast at arrival
-    return max(0.05, h_est)
 
 
 def estimate_h_from_cooling(samples, chamber_heat_capacity, t_ambient,
@@ -392,29 +351,5 @@ def format_calibration_report(result, cooling_rates):
         lines.append("")
         lines.append(
             "  bed_transfer = %.4f W/K" % result.bed_transfer)
-
-    return lines
-
-
-def format_cooling_rate_comments(result, cooling_rates):
-    """Format cooling rate table for autosave comment block.
-
-    Args:
-        result: CalibrationResult instance
-        cooling_rates: output of compute_cooling_rates()
-
-    Returns:
-        list of comment lines (without #*# prefix)
-    """
-    lines = [
-        "# Calibration T_ambient: %.1f\u00b0C" % result.t_ambient,
-        "#",
-        "# Passive cooling rate at 10\u00b0C intervals:",
-    ]
-
-    for T, rate, is_cal in cooling_rates:
-        marker = "  (calibrated)" if is_cal else ""
-        lines.append(
-            "#   T=%3d\u00b0C: %+.2f\u00b0C/min%s" % (int(T), rate, marker))
 
     return lines

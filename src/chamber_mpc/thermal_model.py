@@ -46,7 +46,7 @@ class ThermalModel:
         self.state_chamber_temp = AMBIENT_TEMP_DEFAULT
         self.state_s1_temp = AMBIENT_TEMP_DEFAULT
         self.state_ambient_temp = AMBIENT_TEMP_DEFAULT
-        self.state_disturbance = 0.0  # offset-free MPC disturbance (watts)
+        self.state_disturbance = 0.0  # estimated unmodeled power (watts)
         self.last_power = 0.0
         self.last_time = 0.0
 
@@ -173,7 +173,7 @@ class ThermalModel:
             except Exception:
                 pass  # pragma: no cover -- sensor read failure, skip feedforward
 
-        # Chamber temperature update (includes disturbance for offset-free control)
+        # Chamber temperature update (includes disturbance estimate)
         dT_chamber = (
             (p_heating + self.state_disturbance + p_bed - p_loss_ambient)
             * dt / self.chamber_heat_capacity

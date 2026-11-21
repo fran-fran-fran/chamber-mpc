@@ -7,8 +7,8 @@
 # Description: Klippy plugin entry point for chamber_mpc.
 #              Configures MPC control on a heater_generic at startup
 #              by replacing its default control algorithm.
-#              Supports two model types: basic (2-state) and advanced (4-state).
-#              Kalman filtering is used for state estimation in both.
+#              Uses the 2-state model with Kalman filtering for state
+#              estimation.
 
 try:
     from chamber_mpc.__version__ import version as __version__
@@ -18,20 +18,17 @@ except ImportError:
 import logging
 
 from .control import ControlMPCChamber
-from .h_interpolator import HInterpolator
-
-VALID_MODEL_TYPES = ('basic', 'advanced')
 
 
 class ChamberMpcModule:
     """Klipper module for [chamber_mpc] config section.
 
     Reads MPC chamber configuration, validates parameter consistency,
-    builds the appropriate model+estimator combination, and replaces
-    the heater's control at klippy:ready.
+    builds the model and estimator, and replaces the heater's control
+    at klippy:ready.
 
-    Model type: basic (2-state) or advanced (4-state).
-    Kalman filtering with disturbance estimation for all modes.
+    Uses the 2-state model with Kalman filtering and disturbance
+    estimation.
     """
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -65,28 +62,11 @@ class ChamberMpcModule:
         # Required
         profile['heater_power'] = config.getfloat('heater_power')
 
-        # Model and estimator type
-        profile['model_type'] = config.get('model_type', 'basic').lower()
-
-        if profile['model_type'] not in VALID_MODEL_TYPES:
-            raise config.error(
-                "model_type must be 'basic' or 'advanced', got '%s'"
-                % profile['model_type'])
-
-        # Basic model parameters (always parsed)
+        # Model parameters
         profile['chamber_heat_capacity'] = config.getfloat(
             'chamber_heat_capacity', default=None)
         profile['s1_responsiveness'] = config.getfloat(
             's1_responsiveness', default=None)
-
-        # Advanced model parameters (optional, only for advanced mode)
-        profile['heater_heat_capacity'] = config.getfloat(
-            'heater_heat_capacity', default=None)
-        profile['heating_element_transfer'] = config.getfloat(
-            'heating_element_transfer', default=None)
-        profile['s2_responsiveness'] = config.getfloat(
-            's2_responsiveness', default=None)
-        
 
         # h(T) calibration points
         h_raw = config.get('ambient_transfer_points', default=None)
@@ -106,13 +86,6 @@ class ChamberMpcModule:
             'measurement_noise_s1', 0.5)
         profile['process_noise_disturbance'] = config.getfloat(
             'process_noise_disturbance', 10.0)
-        # Advanced Kalman parameters
-        profile['process_noise_heater'] = config.getfloat(
-            'process_noise_heater', default=None)
-        profile['process_noise_s2'] = config.getfloat(
-            'process_noise_s2', default=None)
-        profile['measurement_noise_s2'] = config.getfloat(
-            'measurement_noise_s2', default=None)
 
         # General tuning
         profile['target_reach_time'] = config.getfloat(
@@ -141,15 +114,13 @@ class ChamberMpcModule:
         return profile
 
     def _validate_config(self, heater):
-        """Validate that calibrated parameters match the selected mode.
+        """Validate that the calibrated model parameters are present.
 
         Returns list of error/warning messages. Empty list = valid.
         """
         p = self.profile
-        model = p['model_type']
         issues = []
 
-        # Basic model requires
         if p['chamber_heat_capacity'] is None:
             issues.append("chamber_heat_capacity not calibrated")
         if p['s1_responsiveness'] is None:
@@ -160,37 +131,6 @@ class ChamberMpcModule:
         if h_raw is None and ambient_transfer is None:
             issues.append(
                 "ambient_transfer_points or ambient_transfer not calibrated")
-
-        # Advanced model additionally requires
-        if model == 'advanced':
-            if p['heater_heat_capacity'] is None:
-                issues.append(
-                    "model_type=advanced requires heater_heat_capacity "
-                    "(not calibrated)")
-            if p['heating_element_transfer'] is None:
-                issues.append(
-                    "model_type=advanced requires heating_element_transfer "
-                    "(not calibrated)")
-            if p['s1_responsiveness'] is None:
-                issues.append(
-                    "model_type=advanced requires s1_responsiveness "
-                    "(not calibrated)")
-            if p['secondary_sensor'] is None:
-                issues.append(
-                    "model_type=advanced requires secondary_sensor "
-                    "(secondary sensor for heater state observation)")
-
-        # Advanced Kalman requires additional noise parameters
-        if model == 'advanced':
-            for param in ('process_noise_heater',
-                          'process_noise_chamber',
-                          'process_noise_s1', 'process_noise_s2',
-                          'measurement_noise_s1',
-                          'measurement_noise_s2'):
-                if p[param] is None:
-                    issues.append(
-                        "model_type=advanced requires %s "
-                        "(not calibrated)" % param)
 
         # Validate s2_safe_temp > heater max_temp
         s2_max = p['s2_safe_temp']
@@ -210,10 +150,9 @@ class ChamberMpcModule:
         # Validate config matches selected mode
         issues = self._validate_config(heater)
         if issues:
-            mode_str = self.profile['model_type']
             self.log.warning(
-                "MPC chamber [%s] config mismatch for mode '%s':",
-                self.heater_name, mode_str)
+                "MPC chamber [%s] config mismatch:",
+                self.heater_name)
             for issue in issues:
                 self.log.warning("  - %s", issue)
             self.log.warning(
@@ -228,9 +167,8 @@ class ChamberMpcModule:
         if self.control.is_valid():
             heater.set_control(self.control)
             self.log.info(
-                "MPC chamber control active on '%s' (model=%s)",
-                self.heater_name,
-                self.profile['model_type'])
+                "MPC chamber control active on '%s'",
+                self.heater_name)
         else:
             self.log.warning(
                 "MPC chamber failed to initialize for '%s'. "
@@ -252,8 +190,7 @@ class ChamberMpcModule:
     def cmd_MPC_CHAMBER_STATUS(self, gcmd):
         if self.control is None:
             gcmd.respond_info(
-                "MPC chamber: not active (model=%s, check log for issues)"
-                % self.profile['model_type'])
+                "MPC chamber: not active (check log for issues)")
             return
         self.control.cmd_MPC_CHAMBER_STATUS(gcmd)
 
@@ -261,10 +198,7 @@ class ChamberMpcModule:
         """Expose status for Moonraker."""
         if self.control and self.control.is_valid():
             return self.control.get_status(eventtime)
-        return {
-            'state': 'uncalibrated',
-            'model_type': self.profile['model_type'],
-        }
+        return {'state': 'uncalibrated'}
 
 
 def load_config(config):

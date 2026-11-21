@@ -8,9 +8,11 @@
 #              Klipper's reactor.
 #
 #              The calibration is fully self-bootstrapping:
+#              - Precondition: Bed is off and cool
 #              - Phase 0: Measure or accept ambient temperature
 #              - Phase 1: Open-loop step response to first target
-#                         (identifies C, s1_responsiveness, rough h)
+#                         (identifies C and s1_responsiveness)
+#              - Phase 1b: Passive cooling estimate of rough h
 #              - Phase 2: MPC holds at each target using progressively
 #                         refined parameters (identifies h at each point)
 #              - Phase 3: Optional bed transfer measurement using
@@ -20,14 +22,13 @@
 
 import logging
 
-SETTLE_TIMEOUT_S = 600.0  # 10 minutes max wait for steady state
-
 from .calibrate import (
     StepResponseAnalyzer, CalibrationResult,
     estimate_h_from_cooling,
     compute_cooling_rates, format_calibration_report,
-    SETTLE_TOLERANCE_C, SETTLE_DURATION_S, POWER_MEASURE_WINDOW_S,
-    STEP_RESPONSE_POWER, BED_COOLDOWN_TOLERANCE_C,
+    SETTLE_TOLERANCE_C, SETTLE_DURATION_S, SETTLE_TIMEOUT_S,
+    POWER_MEASURE_WINDOW_S, STEP_RESPONSE_POWER,
+    BED_COOLDOWN_TOLERANCE_C, BED_HEAT_TIMEOUT_S,
 )
 from .h_interpolator import HInterpolator
 from .kalman import KalmanFilter3
@@ -116,8 +117,10 @@ class MpcChamberCalibrateRunner:
     No PID or external controller is needed.
 
     Sequence:
+        Precondition: Bed heater off and within a few deg C of the chamber
         Phase 0: Measure T_ambient (or accept from T_AMBIENT parameter)
-        Phase 1: Step response to first point (identify C, s1_resp, rough h)
+        Phase 1: Step response to first point (identify C and s1_resp)
+        Phase 1b: Passive cooling estimate of rough h
         Phase 2: MPC holds at each point (identify h at each temperature)
         Phase 3: Optional bed transfer using calibrated MPC (identify h_bed)
     """
@@ -126,6 +129,7 @@ class MpcChamberCalibrateRunner:
         self.printer = printer
         self.heater = heater
         self.orig_control = orig_control
+        self.profile = orig_control.profile or {}
         self.log = logging.getLogger('chamber_mpc.calibrate')
         self._bed_heater = None
 
@@ -138,6 +142,10 @@ class MpcChamberCalibrateRunner:
         bed_temp = gcmd.get_float('BED_TEMP', default=None)
         t_ambient_override = gcmd.get_float('T_AMBIENT', default=None)
         initial_h = gcmd.get_float('INITIAL_H', default=None)
+        settle_timeout = gcmd.get_float(
+            'SETTLE_TIMEOUT', SETTLE_TIMEOUT_S, above=0.)
+        bed_timeout = gcmd.get_float(
+            'BED_TIMEOUT', BED_HEAT_TIMEOUT_S, above=0.)
 
         if not points:
             raise gcmd.error("POINTS must specify at least one temperature")
@@ -155,7 +163,7 @@ class MpcChamberCalibrateRunner:
         try:
             result = self._run_calibration(
                 gcmd, tuning, points, bed_temp, t_ambient_override,
-                initial_h)
+                initial_h, settle_timeout, bed_timeout)
             self._save_results(gcmd, result)
         except self.printer.command_error as e:
             raise gcmd.error("Calibration failed: %s" % e)
@@ -167,7 +175,9 @@ class MpcChamberCalibrateRunner:
                 self._bed_heater.set_temp(0.0)
 
     def _run_calibration(self, gcmd, tuning, points, bed_temp,
-                         t_ambient_override=None, initial_h=1.0):
+                         t_ambient_override=None, initial_h=None,
+                         settle_timeout=SETTLE_TIMEOUT_S,
+                         bed_timeout=BED_HEAT_TIMEOUT_S):
         """Execute the calibration sequence."""
         result = CalibrationResult()
 
@@ -176,14 +186,11 @@ class MpcChamberCalibrateRunner:
         self._ensure_bed_is_cold()
 
         # Get heater power from config
-        heater_power = 0
-        if self.orig_control.profile:
-            heater_power = self.orig_control.profile.get('heater_power', 0)
+        heater_power = self.profile.get('heater_power', 0)
         if heater_power <= 0:
-            heater_power = self.heater.max_power
-            gcmd.respond_info(
-                "WARNING: heater_power not set in [chamber_mpc], "
-                "using max_power=%.0f (this may be incorrect)" % heater_power)
+            raise self.printer.command_error(
+                "heater_power must be configured in [chamber_mpc] "
+                "for calibration")
 
         # Phase 0: ambient temperature
         tuning.set_output(0.0, 0.0)
@@ -194,10 +201,10 @@ class MpcChamberCalibrateRunner:
                 % result.t_ambient)
             gcmd.respond_info(
                 "  Waiting for temperature to stabilize...")
-            self._wait_for_stability()
+            self._wait_for_stable_temperature()
         else:
             gcmd.respond_info("Phase 0: Measuring ambient temperature...")
-            result.t_ambient = self._measure_ambient()
+            result.t_ambient = self._wait_for_stable_temperature()
             gcmd.respond_info(
                 "  T_ambient = %.1f\u00b0C" % result.t_ambient)
 
@@ -261,16 +268,15 @@ class MpcChamberCalibrateRunner:
 
             # Wait for temperature to settle (with periodic status)
             gcmd.respond_info("    Waiting for steady state...")
-            settled, actual_temp = self._wait_settle_with_status(
-                target, model, gcmd)
+            settled, actual_temp = self._wait_settle(
+                target, settle_timeout, model, gcmd)
 
             if not settled:
-                gcmd.respond_info(
-                    "    WARNING: Timed out after %.0f s. "
-                    "Using actual temperature %.1f\u00b0C instead of "
-                    "target %.1f\u00b0C"
-                    % (SETTLE_TIMEOUT_S, actual_temp, target))
-                target = round(actual_temp, 1)
+                raise self.printer.command_error(
+                    "Chamber did not settle at %.1f deg C within %.0f s "
+                    "(last temperature %.1f deg C). Increase "
+                    "SETTLE_TIMEOUT or check the heater."
+                    % (target, settle_timeout, actual_temp))
 
             # Measure steady-state power
             gcmd.respond_info("    Measuring steady-state power...")
@@ -287,21 +293,28 @@ class MpcChamberCalibrateRunner:
             result.h_points.append((target, h))
             gcmd.respond_info("    h(%.1f) = %.4f W/K" % (target, h))
 
-            # Swap back to tuning control between points
-            # (MPC will be rebuilt with updated h points for next target)
+            # Swap back to tuning control between points. Klipper's
+            # set_control() resets the heater target to 0, so no extra
+            # set_temp() is needed here.
             self.heater.set_control(tuning)
-            tuning.set_output(0.0, target)
 
         # Phase 3: optional bed transfer using fully calibrated MPC
         if bed_temp is not None:
             gcmd.respond_info(
                 "Phase 3: Bed transfer measurement at bed=%.0f\u00b0C..."
                 % bed_temp)
-            result.bed_transfer = self._measure_bed_transfer(
-                gcmd, bed_temp, points[-1], result, heater_power)
-            gcmd.respond_info(
-                "  bed_transfer = %.4f W/K" % result.bed_transfer)
-
+            chamber_target = (
+                result.h_points[-1][0] if result.h_points else points[-1])
+            try:
+                result.bed_transfer = self._measure_bed_transfer(
+                    gcmd, bed_temp, chamber_target, result, heater_power,
+                    settle_timeout, bed_timeout)
+                gcmd.respond_info(
+                    "  bed_transfer = %.4f W/K" % result.bed_transfer)
+            except self.printer.command_error as e:
+                result.bed_transfer = None
+                gcmd.respond_info(
+                    "WARNING: Bed transfer calibration skipped: %s" % e)
 
         return result
 
@@ -310,39 +323,57 @@ class MpcChamberCalibrateRunner:
     def _build_model(self, result, h_points, heater_power):
         """Build a ThermalModel with Kalman filter for calibration.
 
-        Uses Kalman estimation with disturbance state for offset-free
-        control during calibration. The disturbance state accumulates
-        persistent prediction errors caused by wrong h, providing
-        correct steady-state power regardless of h accuracy.
-
-        Large Q_chamber: model is uncertain (h may be wrong)
-        Small Q_sensor: sensor lag dynamics are well-modeled
-        Moderate Q_disturbance: disturbance adapts over ~30s
-        Moderate R: typical PT1000 noise level
+        Uses the profile's estimator tuning and target_reach_time. The
+        disturbance state absorbs persistent prediction errors; because
+        it is used in propagation but not in the output law, a small
+        steady-state offset can remain when h is inaccurate.
         """
         kalman = KalmanFilter3(
-            process_noise_chamber=1.0,
-            process_noise_s1=0.1,
-            process_noise_disturbance=500.0,
-            measurement_noise_s1=0.5,
+            process_noise_chamber=self.profile.get(
+                'process_noise_chamber', 1.0),
+            process_noise_s1=self.profile.get(
+                'process_noise_s1', 0.1),
+            process_noise_disturbance=self.profile.get(
+                'process_noise_disturbance', 10.0),
+            measurement_noise_s1=self.profile.get(
+                'measurement_noise_s1', 0.5),
         )
         model = ThermalModel(
             chamber_heat_capacity=result.chamber_heat_capacity,
             s1_responsiveness=result.s1_responsiveness,
             h_interpolator=HInterpolator(h_points),
             heater_power=heater_power,
+            target_reach_time=self.profile.get('target_reach_time', 2.0),
             kalman_filter=kalman,
         )
         current_temp, _ = self.heater.get_temp(
             self.heater.reactor.monotonic())
         model.set_initial_state(current_temp)
         model.set_ambient(result.t_ambient)
+        self._attach_secondary_sensor(model)
         return model
+
+    def _attach_secondary_sensor(self, model):
+        """Attach the configured secondary-sensor limit to a model."""
+        sensor_name = self.profile.get('secondary_sensor')
+        if not sensor_name:
+            return
+        try:
+            sensor = self.printer.lookup_object(
+                'temperature_sensor %s' % sensor_name)
+            model.set_secondary_sensor_limit(
+                sensor.get_temp,
+                self.profile.get('s2_safe_temp', 250.0),
+                self.profile.get('s2_safe_temp_zone', 20.0))
+        except Exception as e:
+            self.log.warning(
+                "Could not attach secondary sensor '%s' during "
+                "calibration: %s", sensor_name, e)
 
     # -- Phase 0: Ambient measurement --
 
-    def _measure_ambient(self):
-        """Wait for temperature to stabilize and record ambient."""
+    def _wait_for_stable_temperature(self):
+        """Wait for a slow temperature rate and return the last reading."""
         samples = []
 
         def process(eventtime):
@@ -361,30 +392,6 @@ class MpcChamberCalibrateRunner:
 
         self.printer.wait_while(process)
         return samples[-1][1]
-
-    def _wait_for_stability(self):
-        """Wait for temperature to stop changing.
-
-        Used when T_AMBIENT is provided and the chamber may be warm
-        but in equilibrium.
-        """
-        samples = []
-
-        def process(eventtime):
-            temp, _ = self.heater.get_temp(eventtime)
-            samples.append((eventtime, temp))
-            while samples and samples[0][0] < eventtime - 30.0:
-                samples.pop(0)
-            if len(samples) < 30:
-                return True
-            duration = samples[-1][0] - samples[0][0]
-            if duration < 10.0:
-                return True
-            dt = samples[-1][1] - samples[0][1]
-            rate = abs(dt / duration)
-            return rate > 0.05
-
-        self.printer.wait_while(process)
 
     # -- Phase 1: Step response --
 
@@ -484,7 +491,8 @@ class MpcChamberCalibrateRunner:
     # -- Phase 3: Bed transfer --
 
     def _measure_bed_transfer(self, gcmd, bed_temp, chamber_target,
-                              result, heater_power):
+                              result, heater_power, settle_timeout,
+                              bed_timeout):
         """Measure bed heat transfer coefficient using calibrated MPC.
 
         All chamber parameters are identified by this point. MPC holds
@@ -498,7 +506,14 @@ class MpcChamberCalibrateRunner:
 
         # Measure baseline power (bed off)
         gcmd.respond_info("    Measuring baseline power (bed off)...")
-        self._wait_settle(chamber_target)
+        settled, actual_temp = self._wait_settle(
+            chamber_target, settle_timeout, model, gcmd)
+        if not settled:
+            raise self.printer.command_error(
+                "Chamber did not settle at %.1f deg C within %.0f s "
+                "before the bed-transfer baseline (last temperature "
+                "%.1f deg C)." % (chamber_target, settle_timeout,
+                                  actual_temp))
         power_no_bed = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
         power_no_bed_watts = power_no_bed * heater_power
 
@@ -510,30 +525,56 @@ class MpcChamberCalibrateRunner:
 
         # Wait for bed to reach target
         gcmd.respond_info("    Waiting for bed to reach target...")
+        bed_start = [None]
+        bed_timed_out = [False]
 
         def wait_bed(eventtime):
+            if bed_start[0] is None:
+                bed_start[0] = eventtime
             temp, _ = bed_heater.get_temp(eventtime)
-            return temp < bed_temp - 2.0
+            if temp >= bed_temp - 2.0:
+                return False
+            if eventtime - bed_start[0] > bed_timeout:
+                bed_timed_out[0] = True
+                return False
+            return True
 
         self.printer.wait_while(wait_bed)
+        if bed_timed_out[0]:
+            last_bed_temp, _ = bed_heater.get_temp(
+                self.heater.reactor.monotonic())
+            raise self.printer.command_error(
+                "Bed heater did not reach %.0f deg C within %.0f s "
+                "(last temperature %.1f deg C). Increase BED_TIMEOUT "
+                "or check the bed heater."
+                % (bed_temp, bed_timeout, last_bed_temp))
 
         # Wait for chamber to re-settle
         gcmd.respond_info("    Waiting for chamber to re-settle...")
-        self._wait_settle(chamber_target)
+        settled, actual_temp = self._wait_settle(
+            chamber_target, settle_timeout, model, gcmd)
+        if not settled:
+            raise self.printer.command_error(
+                "Chamber did not settle at %.1f deg C within %.0f s "
+                "with the bed at %.0f deg C (last temperature %.1f deg C). "
+                "The bed may be too hot; lower BED_TEMP or increase "
+                "SETTLE_TIMEOUT."
+                % (chamber_target, settle_timeout, bed_temp, actual_temp))
 
         # Measure power with bed on
         gcmd.respond_info("    Measuring power with bed on...")
         power_with_bed = self._measure_avg_power(POWER_MEASURE_WINDOW_S)
         power_with_bed_watts = power_with_bed * heater_power
 
-        # Turn bed off
+        # Read actual temperatures before turning the bed off.
+        eventtime = self.heater.reactor.monotonic()
+        actual_bed_temp, _ = bed_heater.get_temp(eventtime)
+        actual_chamber_temp, _ = self.heater.get_temp(eventtime)
         bed_heater.set_temp(0.0)
 
         # h_bed = (P_no_bed - P_with_bed) / (T_bed - T_chamber)
-        actual_bed_temp, _ = bed_heater.get_temp(
-            self.heater.reactor.monotonic())
         delta_power = power_no_bed_watts - power_with_bed_watts
-        delta_T = actual_bed_temp - chamber_target
+        delta_T = actual_bed_temp - actual_chamber_temp
         if abs(delta_T) < 5.0:
             raise self.printer.command_error(
                 "Bed temperature too close to chamber temperature "
@@ -549,9 +590,7 @@ class MpcChamberCalibrateRunner:
         chamber, abort instead of waiting: the user should let it cool and
         then rerun the calibration.
         """
-        bed_name = None
-        if self.orig_control.profile:
-            bed_name = self.orig_control.profile.get('bed_heater')
+        bed_name = self.profile.get('bed_heater')
         if not bed_name:
             return
 
@@ -574,9 +613,7 @@ class MpcChamberCalibrateRunner:
         """Look up the bed heater object."""
         if self._bed_heater is not None:
             return self._bed_heater
-        bed_name = None
-        if self.orig_control.profile:
-            bed_name = self.orig_control.profile.get('bed_heater')
+        bed_name = self.profile.get('bed_heater')
         if not bed_name:
             raise self.printer.command_error(
                 "bed_heater not configured in [chamber_mpc]")
@@ -586,30 +623,12 @@ class MpcChamberCalibrateRunner:
 
     # -- Shared utilities --
 
-    def _wait_settle(self, target):
-        """Wait for temperature to settle within tolerance."""
-        stable_since = [None]
+    def _wait_settle(self, target, timeout_s, model=None, gcmd=None):
+        """Wait for a stable temperature, with optional MPC status output.
 
-        def process(eventtime):
-            temp, _ = self.heater.get_temp(eventtime)
-            if abs(temp - target) < SETTLE_TOLERANCE_C:
-                if stable_since[0] is None:
-                    stable_since[0] = eventtime
-                elif eventtime - stable_since[0] > SETTLE_DURATION_S:
-                    return False
-            else:
-                stable_since[0] = None
-            return True
-
-        self.printer.wait_while(process)
-
-    def _wait_settle_with_status(self, target, model, gcmd):
-        """Wait for temperature to settle, printing MPC status every 60s.
-
-        Returns:
-            (settled, actual_temp): settled is True if target was reached
-            within tolerance, False if timed out. actual_temp is the
-            temperature at which the system stabilized.
+        The temperature must stay within SETTLE_TOLERANCE_C for
+        SETTLE_DURATION_S. Returns (settled, actual_temp); settled is
+        False when timeout_s expires.
         """
         stable_since = [None]
         last_status_time = [None]
@@ -624,32 +643,34 @@ class MpcChamberCalibrateRunner:
             # Check timeout
             if start_time[0] is None:
                 start_time[0] = eventtime
-            elif eventtime - start_time[0] > SETTLE_TIMEOUT_S:
+            elif eventtime - start_time[0] > timeout_s:
                 timed_out[0] = True
                 return False
 
-            # Print status every 60 seconds
-            if last_status_time[0] is None:
-                last_status_time[0] = eventtime
-            elif eventtime - last_status_time[0] >= 60.0:
-                last_status_time[0] = eventtime
-                status = model.get_status()
-                k = status.get('kalman_gain')
-                k_str = ""
-                if k is not None:
-                    k_str = ", kalman_gain=[%s]" % ", ".join("%.4f" % v for v in k)
-                d = status.get('disturbance', 0.0)
-                d_str = ""
-                if d != 0.0:
-                    d_str = ", d=%.1f W" % d
-                gcmd.respond_info(
-                    "    [status] chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
-                    "ambient=%.1f\u00b0C, power=%.1f W, "
-                    "avg=%.1f W (%.0f%%)%s%s"
-                    % (status['temp_chamber'], status['temp_s1'],
-                       status['temp_ambient'], status['power'],
-                       status['avg_power'], status['avg_duty'] * 100,
-                       d_str, k_str))
+            # Print status every 60 seconds when requested
+            if model is not None and gcmd is not None:
+                if last_status_time[0] is None:
+                    last_status_time[0] = eventtime
+                elif eventtime - last_status_time[0] >= 60.0:
+                    last_status_time[0] = eventtime
+                    status = model.get_status()
+                    k = status.get('kalman_gain')
+                    k_str = ""
+                    if k is not None:
+                        k_str = ", kalman_gain=[%s]" % ", ".join(
+                            "%.4f" % v for v in k)
+                    d = status.get('disturbance', 0.0)
+                    d_str = ""
+                    if d != 0.0:
+                        d_str = ", d=%.1f W" % d
+                    gcmd.respond_info(
+                        "    [status] chamber=%.1f\u00b0C, s1=%.1f\u00b0C, "
+                        "ambient=%.1f\u00b0C, power=%.1f W, "
+                        "avg=%.1f W (%.0f%%)%s%s"
+                        % (status['temp_chamber'], status['temp_s1'],
+                           status['temp_ambient'], status['power'],
+                           status['avg_power'], status['avg_duty'] * 100,
+                           d_str, k_str))
 
             # Settle detection
             if abs(temp - target) < SETTLE_TOLERANCE_C:
@@ -662,7 +683,8 @@ class MpcChamberCalibrateRunner:
             return True
 
         self.printer.wait_while(process)
-        return (not timed_out[0], last_temp[0])
+        return (not timed_out[0], last_temp[0]
+                if last_temp[0] is not None else target)
 
     def _save_results(self, gcmd, result):
         """Save calibration results to config and report to user."""
